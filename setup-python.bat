@@ -16,5 +16,6 @@ if errorlevel 1 exit /b %errorlevel%
 python -m pip install -r requirements.txt
 if errorlevel 1 exit /b %errorlevel%
 echo.
-echo Python engine installed. Run FB2AccentConverter.exe.
+echo Python engine installed. For NVIDIA RTX acceleration, install CUDA-enabled PyTorch separately using the command in README.txt.
+echo Run FB2AccentConverter.exe; it will test GPU availability automatically.
 pause

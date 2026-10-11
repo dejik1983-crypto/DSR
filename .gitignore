@@ -7,6 +7,8 @@ obj/
 # Published distributions and model downloads
 publish/
 model-cache/
+# Local runtime data normally lives in %LocalAppData%\DSR, but ignore it if it appears here
+DSR-data/
 
 # Python artifacts and local virtual environments
 __pycache__/

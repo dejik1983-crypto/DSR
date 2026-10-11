@@ -8,4 +8,4 @@
 5. Соберите проект командой `dotnet build FB2AccentConverter.csproj -c Debug -p:EnableWindowsTargeting=true` из папки DSR.
 6. В описании Pull Request укажите, что изменилось и как проверялось.
 
-DSR ссылается на соседний проект DeepReader 1.6.2. Если у вас другая структура каталогов, путь при сборке можно передать через `-p:DeepReaderProjectPath="путь\DeepReader.csproj"`.
+DSR автоматически ищет соседний проект DeepReader в каталоге по шаблону `DeepReader_x64 V*Beta Bionic` (рядом должна быть только одна версия). Если у вас другая структура каталогов, путь при сборке можно передать через `-p:DeepReaderProjectPath="путь\DeepReader.csproj"`.

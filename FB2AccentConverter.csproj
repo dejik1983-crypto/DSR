@@ -7,11 +7,11 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>
-    <AssemblyName>FB2AccentConverter</AssemblyName>
+    <AssemblyName>DSR</AssemblyName>
     <RootNamespace>FB2AccentConverter</RootNamespace>
-    <Version>1.0.0-beta</Version>
-    <AssemblyVersion>1.0.0.0</AssemblyVersion>
-    <FileVersion>1.0.0.0</FileVersion>
+    <Version>1.1.1</Version>
+    <AssemblyVersion>1.1.1.0</AssemblyVersion>
+    <FileVersion>1.1.1.0</FileVersion>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>true</SelfContained>
     <PublishSingleFile>true</PublishSingleFile>
@@ -22,10 +22,11 @@
     <DebugSymbols>false</DebugSymbols>
   </PropertyGroup>
   <PropertyGroup>
-    <DeepReaderProjectPath Condition="'$(DeepReaderProjectPath)' == ''">$(MSBuildThisFileDirectory)..\DeepReader_x64 V1.6.2Beta Bionic\DeepReader.csproj</DeepReaderProjectPath>
+    <DeepReaderProjectPath Condition="'$(DeepReaderProjectPath)' == ''">$(MSBuildThisFileDirectory)..\DeepReader_x64 V*Beta Bionic\DeepReader.csproj</DeepReaderProjectPath>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="$(DeepReaderProjectPath)" AdditionalProperties="SelfContained=true;RuntimeIdentifier=win-x64" />
-    <None Update="ruaccent_worker.py" CopyToOutputDirectory="PreserveNewest" />
+    <EmbeddedResource Include="ruaccent_worker.py" LogicalName="DSR.ruaccent_worker.py" />
+    <EmbeddedResource Include="requirements.txt" LogicalName="DSR.requirements.txt" />
   </ItemGroup>
 </Project>

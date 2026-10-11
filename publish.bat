@@ -1,14 +1,13 @@
 @echo off
 setlocal
 cd /d "%~dp0"
+if exist publish rmdir /s /q publish
 dotnet publish FB2AccentConverter.csproj -c Release -r win-x64 -p:EnableWindowsTargeting=true -p:DebugType=None -p:DebugSymbols=false -o "publish"
 if errorlevel 1 exit /b %errorlevel%
-if exist publish\DeepReader.pdb del /q publish\DeepReader.pdb
-if exist publish\model-cache rmdir /s /q publish\model-cache
-copy /Y requirements.txt publish\requirements.txt >nul
-copy /Y README.md publish\README.txt >nul
-copy /Y setup-python.bat publish\setup-python.bat >nul
-copy /Y ruaccent_worker.py publish\ruaccent_worker.py >nul
+rem publish must contain exactly one file: DSR.exe
+for %%F in (publish\*) do if /I not "%%~nxF"=="DSR.exe" del /q "%%F"
 echo.
-echo Ready-to-copy application: %cd%\publish
-echo Copy that folder to the target PC, run setup-python.bat once, then run FB2AccentConverter.exe.
+echo Ready to copy: %cd%\publish\DSR.exe
+echo Everything else (Python environment, scripts, caches, models) is created on first run
+rem double %% prints as a single % in the message below
+echo in %%LocalAppData%%\DSR and can be deleted safely; DSR rebuilds it automatically.
