@@ -1,0 +1,29 @@
+# .NET build artifacts
+bin/
+obj/
+[Bb]in/
+[Oo]bj/
+
+# Published distributions and model downloads
+publish/
+model-cache/
+
+# Python artifacts and local virtual environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# IDE and local settings
+.vs/
+.idea/
+.vscode/
+*.user
+*.suo
+# Logs and temporary conversion files
+*.log
+*.tmp
+# Local books are ignored; only explicitly maintained small test fixtures are included.
+*.fb2
+!samples/DeepReader-accented-sample.fb2
+!samples/DeepReader-accented-sample_ударения.fb2
