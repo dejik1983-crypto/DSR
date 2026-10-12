@@ -1,0 +1,133 @@
+<Window x:Class="FB2AccentConverter.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="FB2 Accent Converter — ударения в книге"
+        Width="850" Height="820" MinWidth="720" MinHeight="700"
+        WindowStartupLocation="CenterScreen" Background="#F4EDDD"
+        Foreground="#3F3025" FontFamily="Segoe UI" FontSize="13">
+    <Window.Resources>
+        <SolidColorBrush x:Key="Card" Color="#FCF8EF" />
+        <SolidColorBrush x:Key="Ink" Color="#3F3025" />
+        <SolidColorBrush x:Key="MutedInk" Color="#70604D" />
+        <SolidColorBrush x:Key="Rule" Color="#D2C2A5" />
+        <SolidColorBrush x:Key="Accent" Color="#74462A" />
+        <Style TargetType="Button">
+            <Setter Property="Background" Value="{StaticResource Card}" />
+            <Setter Property="Foreground" Value="{StaticResource Ink}" />
+            <Setter Property="BorderBrush" Value="{StaticResource Rule}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Padding" Value="12,7" />
+            <Setter Property="Margin" Value="0,2,6,2" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="4">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True"><Setter Property="BorderBrush" Value="#8B5734" /></Trigger>
+                            <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.52" /><Setter Property="Cursor" Value="Arrow" /></Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <Style TargetType="TextBox">
+            <Setter Property="Background" Value="{StaticResource Card}" />
+            <Setter Property="Foreground" Value="{StaticResource Ink}" />
+            <Setter Property="BorderBrush" Value="{StaticResource Rule}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Padding" Value="8,6" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+        </Style>
+        <Style TargetType="ComboBox">
+            <Setter Property="Background" Value="{StaticResource Card}" />
+            <Setter Property="Foreground" Value="{StaticResource Ink}" />
+            <Setter Property="BorderBrush" Value="{StaticResource Rule}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Padding" Value="6,4" />
+            <Setter Property="MinHeight" Value="32" />
+        </Style>
+        <Style TargetType="CheckBox"><Setter Property="Foreground" Value="{StaticResource Ink}" /><Setter Property="Margin" Value="0,5" /></Style>
+        <Style TargetType="GroupBox">
+            <Setter Property="Background" Value="{StaticResource Card}" />
+            <Setter Property="Foreground" Value="{StaticResource Ink}" />
+            <Setter Property="BorderBrush" Value="{StaticResource Rule}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Padding" Value="14" />
+            <Setter Property="Margin" Value="0,0,0,12" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+        </Style>
+    </Window.Resources>
+    <DockPanel Margin="26">
+        <StackPanel DockPanel.Dock="Top" Margin="0,0,0,16">
+            <TextBlock Text="Расстановка ударений в FB2 и TXT" FontSize="25" FontWeight="SemiBold" Foreground="{StaticResource Ink}" />
+            <TextBlock Text="Создайте копию книги с ударениями. Исходный файл не изменяется." Margin="0,5,0,0" Foreground="{StaticResource MutedInk}" TextWrapping="Wrap" />
+        </StackPanel>
+        <StackPanel DockPanel.Dock="Bottom" Margin="0,12,0,0">
+            <GroupBox Header="Загрузка ресурсов">
+                <Grid Margin="0,0,0,10">
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="48" /><ColumnDefinition Width="*" /><ColumnDefinition Width="170" /></Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                    <TextBlock Grid.Row="0" Text="CPU" VerticalAlignment="Center" Margin="0,2,8,2" />
+                    <ProgressBar x:Name="CpuUsageBar" Grid.Row="0" Grid.Column="1" Minimum="0" Maximum="100" Height="8" VerticalAlignment="Center" Margin="0,4,10,4" />
+                    <TextBlock x:Name="CpuLabel" Grid.Row="0" Grid.Column="2" Text="CPU: измерение…" VerticalAlignment="Center" />
+                    <TextBlock Grid.Row="1" Text="ОЗУ" VerticalAlignment="Center" Margin="0,2,8,2" />
+                    <ProgressBar x:Name="MemoryUsageBar" Grid.Row="1" Grid.Column="1" Minimum="0" Maximum="100" Height="8" VerticalAlignment="Center" Margin="0,4,10,4" />
+                    <TextBlock x:Name="MemoryLabel" Grid.Row="1" Grid.Column="2" Text="ОЗУ: измерение…" VerticalAlignment="Center" />
+                    <TextBlock Grid.Row="2" Text="GPU" VerticalAlignment="Center" Margin="0,2,8,2" />
+                    <ProgressBar x:Name="GpuUsageBar" Grid.Row="2" Grid.Column="1" Minimum="0" Maximum="100" Height="8" VerticalAlignment="Center" Margin="0,4,10,4" />
+                    <TextBlock x:Name="GpuLabel" Grid.Row="2" Grid.Column="2" Text="GPU: поиск NVIDIA…" VerticalAlignment="Center" />
+                </Grid>
+            </GroupBox>
+            <TextBlock x:Name="ModelStatusText" TextWrapping="Wrap" Margin="0,7,0,0" Foreground="{StaticResource MutedInk}" />
+            <TextBlock x:Name="ResourceSizeStatusText" TextWrapping="Wrap" Margin="0,3,0,5" Foreground="{StaticResource MutedInk}" />
+            <TextBlock x:Name="StatusText" TextWrapping="Wrap" />
+            <TextBlock x:Name="ConversionStatsText" TextWrapping="Wrap" Margin="0,5,0,0" Foreground="{StaticResource MutedInk}" />
+            <ProgressBar x:Name="ConversionProgressBar" Height="8" Margin="0,8,0,0" Minimum="0" Maximum="100" Visibility="Collapsed" />
+            <WrapPanel Margin="0,12,0,0">
+                <Button x:Name="ClearCacheButton" Content="Очистить модели и кэш" ToolTip="Удаляет папку ресурсов рядом с приложением; приложение и ваши книги не затрагиваются." />
+                <Button x:Name="PrepareButton" Content="Подготовка к работе" />
+                <Button x:Name="ReviewWordsButton" Content="Проверить слова / правки…" IsEnabled="False" />
+                <Button x:Name="ConvertButton" Content="Начать конвертацию" Background="{StaticResource Accent}" Foreground="White" FontWeight="SemiBold" />
+                <Button x:Name="PauseConversionButton" Content="Пауза" IsEnabled="False" />
+                <Button x:Name="StopConversionButton" Content="Стоп" IsEnabled="False" />
+            </WrapPanel>
+        </StackPanel>
+        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+            <StackPanel>
+                <GroupBox Header="1. Файл книги">
+                    <DockPanel>
+                        <Button x:Name="BrowseInputButton" DockPanel.Dock="Right" Content="Выбрать FB2 или TXT…" />
+                        <TextBox x:Name="InputTextBox" IsReadOnly="True" MinWidth="390" Margin="0,0,10,0" />
+                    </DockPanel>
+                </GroupBox>
+                <GroupBox Header="2. Куда сохранить результат">
+                    <StackPanel>
+                        <DockPanel>
+                            <Button x:Name="BrowseOutputButton" DockPanel.Dock="Right" Content="Путь…" />
+                            <TextBox x:Name="OutputTextBox" MinWidth="390" />
+                        </DockPanel>
+                        <TextBlock Text="По умолчанию результат сохраняется рядом с исходником: «Имя_ударения.fb2» для FB2 или «Имя_ударения.txt» для TXT. Формат входа и выхода должен совпадать." Margin="0,7,0,0" Foreground="{StaticResource MutedInk}" TextWrapping="Wrap" />
+                    </StackPanel>
+                </GroupBox>
+                <GroupBox Header="3. Параметры обработки">
+                    <StackPanel>
+                        <WrapPanel VerticalAlignment="Center">
+                            <TextBlock Text="Модель ударений:" VerticalAlignment="Center" Margin="0,0,8,0" />
+                            <ComboBox x:Name="ModelComboBox" Width="170" />
+                            <TextBlock Text="Устройство:" VerticalAlignment="Center" Margin="18,0,8,0" />
+                            <ComboBox x:Name="DeviceComboBox" Width="120" />
+                            <Button x:Name="GpuTestButton" Content="Проверить GPU" Margin="12,0,0,0" />
+                        </WrapPanel>
+                        <TextBlock x:Name="GpuStatusText" Text="Проверка NVIDIA RTX…" Margin="0,7,0,0" Foreground="{StaticResource MutedInk}" TextWrapping="Wrap" />
+                        <CheckBox x:Name="IllustrationsCheckBox" Content="Сохранить иллюстрации" IsChecked="True" IsEnabled="False" />
+                        <TextBlock Text="Выбор модели меняет только модель омографов; общая модель ударений и дополнительные модели загружаются отдельно. Turbo — универсальные; big_poetry — крупнее и ориентирована на стихи; tiny — облегчённая. CUDA использует ONNX Runtime. Галочка выше сохраняет иллюстрации FB2." Margin="0,8,0,0" Foreground="{StaticResource MutedInk}" TextWrapping="Wrap" />
+                    </StackPanel>
+                </GroupBox>
+            </StackPanel>
+        </ScrollViewer>
+    </DockPanel>
+</Window>

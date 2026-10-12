@@ -14,6 +14,16 @@ import io
 import sys
 import traceback
 import time
+# Allow an operator to tune CPU inference; cap defaults to avoid oversubscribing
+# small machines. CUDA kernels remain managed by ONNX Runtime.
+_CPU_THREADS = max(1, int(os.environ.get("DSR_CPU_THREADS", os.cpu_count() or 1)))
+# Set before importing ONNX Runtime; provider/session options are fixed during load.
+os.environ["OMP_NUM_THREADS"] = str(_CPU_THREADS)
+os.environ["OMP_WAIT_POLICY"] = "ACTIVE"
+os.environ["OMP_DYNAMIC"] = "FALSE"
+os.environ["OMP_PROC_BIND"] = "TRUE"
+os.environ["MKL_NUM_THREADS"] = str(_CPU_THREADS)
+os.environ["OPENBLAS_NUM_THREADS"] = str(_CPU_THREADS)
 # RUAccent's ONNX inference needs no optional torch import during initialization.
 _DLL_DIRECTORIES = []
 WORD_RE = re.compile(r"[\w\u0400-\u052f+\u0300-\u036f]+(?:[-'’][\w\u0400-\u052f+\u0300-\u036f]+)*", re.UNICODE)
@@ -151,6 +161,18 @@ def install_download_progress(model_name: str) -> None:
     ruaccent_module.hf_hub_download = download_with_progress
 
 
+def configure_onnx_performance(accentizer) -> None:
+    # Report loaded ORT sessions and their active execution providers.
+    for model_name in ("omograph_model", "accent_model", "stress_usage_predictor", "yo_homograph_model"):
+        model = getattr(accentizer, model_name, None)
+        session = getattr(model, "session", None)
+        if session is None:
+            continue
+        # Report actual providers and avoid silently changing session behavior;
+        # thread pools are set via environment before ORT import.
+        print(f"DSR_PERF:{model_name}:providers={','.join(session.get_providers())}:cpu_threads={_CPU_THREADS}", file=sys.stderr, flush=True)
+
+
 def configure_onnx_tokenizer_inputs(accentizer) -> None:
     # Match the tokenizer's outputs to the actual required ONNX model inputs.
     # In particular CharTokenizer otherwise omits token_type_ids on newer exports.
@@ -170,8 +192,8 @@ def words(text: str) -> list[str]:
 
 
 def safe_process(accentizer, text: str) -> str:
-    # Process each line independently. A leading em dash is a frequent case
-    # where RUAccent may consume the first dialogue letter.
+    # Use RUAccent's contextual paragraph inference once (faster and better at
+    # disambiguating homographs). Only recover word-by-word if token alignment fails.
     result = accentizer.process_all(text)
     if words(result) == words(text) and dialogue_initial_words_preserved(text, result):
         return result
@@ -291,6 +313,7 @@ def main() -> int:
             tiny_mode=True,
         )
         configure_onnx_tokenizer_inputs(accentizer)
+        configure_onnx_performance(accentizer)
         if args.device == "CUDA":
             model_names = ("omograph_model", "accent_model", "stress_usage_predictor", "yo_homograph_model")
             active = []
@@ -321,7 +344,10 @@ def main() -> int:
             text = json.loads(line)
             if not isinstance(text, str):
                 raise ValueError("Ожидалась JSON-строка.")
+            inference_started = time.perf_counter()
             result = safe_process(accentizer, text)
+            inference_seconds = time.perf_counter() - inference_started
+            print(f"DSR_INFERENCE:{inference_seconds:.6f}", file=sys.stderr, flush=True)
             print(json.dumps({"text": result}, ensure_ascii=False), flush=True)
         except Exception as exc:
             print(json.dumps({"error": str(exc)}, ensure_ascii=False), flush=True)

@@ -1,13 +1,33 @@
 @echo off
-setlocal
+setlocal EnableExtensions
 cd /d "%~dp0"
-if exist publish rmdir /s /q publish
-dotnet publish FB2AccentConverter.csproj -c Release -r win-x64 -p:EnableWindowsTargeting=true -p:DebugType=None -p:DebugSymbols=false -o "publish"
+set "PROJECT=%~dp0FB2AccentConverter.csproj"
+set "PUBLISH_DIR=%~dp0publish"
+set "DEEPREADER_PROJECT=%~dp0..\DeepReader_x64 V1.6.3Beta Bionic\DeepReader.csproj"
+if not exist "%PROJECT%" (
+    echo ERROR: DSR project not found: "%PROJECT%"
+    exit /b 2
+)
+if not exist "%DEEPREADER_PROJECT%" (
+    echo ERROR: DeepReader project not found: "%DEEPREADER_PROJECT%"
+    exit /b 3
+)
+if exist "%PUBLISH_DIR%" rmdir /s /q "%PUBLISH_DIR%"
+if errorlevel 1 exit /b 4
+rem Prevent the SDK from compiling stale generated files left by interrupted runs.
+if exist "%~dp0obj" rmdir /s /q "%~dp0obj"
+if errorlevel 1 exit /b 6
+if exist "%~dp0bin" rmdir /s /q "%~dp0bin"
+if errorlevel 1 exit /b 7
+dotnet publish "%PROJECT%" -c Release -r win-x64 --self-contained true -p:EnableWindowsTargeting=true -p:DeepReaderProjectPath="%DEEPREADER_PROJECT%" -p:DebugType=None -p:DebugSymbols=false -o "%PUBLISH_DIR%"
 if errorlevel 1 exit /b %errorlevel%
-rem publish must contain exactly one file: DSR.exe
-for %%F in (publish\*) do if /I not "%%~nxF"=="DSR.exe" del /q "%%F"
+if not exist "%PUBLISH_DIR%\DSR.exe" (
+    echo ERROR: DSR.exe missing after publish.
+    exit /b 5
+)
+rem Keep publish single-file: only the executable is distributed.
+for %%F in ("%PUBLISH_DIR%\*") do if /I not "%%~nxF"=="DSR.exe" del /q "%%F"
 echo.
-echo Ready to copy: %cd%\publish\DSR.exe
-echo Everything else (Python environment, scripts, caches, models) is created on first run
-rem double %% prints as a single % in the message below
-echo in %%LocalAppData%%\DSR and can be deleted safely; DSR rebuilds it automatically.
+echo Ready to copy: %PUBLISH_DIR%\DSR.exe
+for %%F in ("%PUBLISH_DIR%\DSR.exe") do echo Size: %%~zF bytes
+echo Everything else (Python environment, models, scripts, caches) is created on first run in %%LocalAppData%%\DSR.

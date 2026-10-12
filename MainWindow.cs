@@ -10,29 +10,35 @@ using System.Windows.Threading;
 
 namespace FB2AccentConverter;
 
-internal sealed class MainWindow : Window
+public sealed partial class MainWindow : Window
 {
-    private readonly TextBox _input = new() { IsReadOnly = true, MinWidth = 390 };
-    private readonly TextBox _output = new() { MinWidth = 390 };
-    private readonly Button _prepareButton = new() { Content = "Подготовка к работе", Padding = new Thickness(10, 8, 10, 8) };
+    private TextBox _input => InputTextBox;
+    private TextBox _output => OutputTextBox;
+    private Button _prepareButton => PrepareButton;
     private bool _prepared;
-    private readonly CheckBox _illustrations = new() { Content = "Сохранить иллюстрации", IsChecked = true, IsEnabled = false };
-    private readonly ComboBox _model = new() { Width = 170, SelectedIndex = 0 };
-    private readonly ComboBox _device = new() { Width = 120, SelectedIndex = 0 };
-    private readonly Button _gpuTest = new() { Content = "Проверить GPU", Padding = new Thickness(10, 5, 10, 5), Margin = new Thickness(12, 0, 0, 0) };
-    private readonly TextBlock _gpuStatus = new() { Text = "Проверка NVIDIA RTX…", Margin = new Thickness(0, 7, 0, 0), Foreground = Brushes.DimGray, TextWrapping = TextWrapping.Wrap };
-    private readonly Button _convert = new() { Content = "Начать конвертацию", Padding = new Thickness(18, 9, 18, 9), FontWeight = FontWeights.SemiBold };
-    private Button _clearCacheButton = new() { Content = "Очистить модели и кэш", Padding = new Thickness(10, 8, 10, 8), ToolTip = "Удаляет папку ресурсов рядом с приложением; приложение и ваши книги не затрагиваются." };
-    private readonly TextBlock _status = new() { Text = "Выберите FB2-файл, чтобы начать.", TextWrapping = TextWrapping.Wrap };
-    private readonly TextBlock _modelStatus = new() { Text = "Модели и служебные файлы хранятся в папке «ресурсы» рядом с приложением.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 7, 0, 0), Foreground = Brushes.DimGray };
-    private readonly TextBlock _resourceSizeStatus = new() { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 3, 0, 5), Foreground = Brushes.DimGray };
-    private readonly ProgressBar _progress = new() { Height = 8, Margin = new Thickness(0, 8, 0, 0), Minimum = 0, Maximum = 100, Visibility = Visibility.Collapsed };
-    private readonly ProgressBar _cpuUsage = new() { Minimum = 0, Maximum = 100, Height = 8, VerticalAlignment = VerticalAlignment.Center };
-    private readonly ProgressBar _memoryUsage = new() { Minimum = 0, Maximum = 100, Height = 8, VerticalAlignment = VerticalAlignment.Center };
-    private readonly ProgressBar _gpuUsage = new() { Minimum = 0, Maximum = 100, Height = 8, VerticalAlignment = VerticalAlignment.Center };
-    private readonly TextBlock _cpuLabel = new() { Text = "CPU: измерение…", VerticalAlignment = VerticalAlignment.Center };
-    private readonly TextBlock _memoryLabel = new() { Text = "ОЗУ: измерение…", VerticalAlignment = VerticalAlignment.Center };
-    private readonly TextBlock _gpuLabel = new() { Text = "GPU: поиск NVIDIA…", VerticalAlignment = VerticalAlignment.Center };
+    private CheckBox _illustrations => IllustrationsCheckBox;
+    private ComboBox _model => ModelComboBox;
+    private ComboBox _device => DeviceComboBox;
+    private Button _gpuTest => GpuTestButton;
+    private TextBlock _gpuStatus => GpuStatusText;
+    private Button _convert => ConvertButton;
+    private Button _pauseConversion => PauseConversionButton;
+    private Button _stopConversion => StopConversionButton;
+    private Button _reviewWords => ReviewWordsButton;
+    private Program.ConversionControl? _conversionControl;
+    private string? _diagnosticsPath;
+    private Button _clearCacheButton => ClearCacheButton;
+    private TextBlock _status => StatusText;
+    private TextBlock _conversionStats => ConversionStatsText;
+    private TextBlock _modelStatus => ModelStatusText;
+    private TextBlock _resourceSizeStatus => ResourceSizeStatusText;
+    private ProgressBar _progress => ConversionProgressBar;
+    private ProgressBar _cpuUsage => CpuUsageBar;
+    private ProgressBar _memoryUsage => MemoryUsageBar;
+    private ProgressBar _gpuUsage => GpuUsageBar;
+    private TextBlock _cpuLabel => CpuLabel;
+    private TextBlock _memoryLabel => MemoryLabel;
+    private TextBlock _gpuLabel => GpuLabel;
     private readonly DispatcherTimer _resourceTimer = new() { Interval = TimeSpan.FromSeconds(1) };
     private long _previousIdle;
     private long _previousKernel;
@@ -43,30 +49,15 @@ internal sealed class MainWindow : Window
 
     public MainWindow()
     {
-        Title = "FB2 Accent Converter — ударения в книге";
-        Width = 850;
-        Height = 820;
-        MinWidth = 720;
-        MinHeight = 700;
-        WindowStartupLocation = WindowStartupLocation.CenterScreen;
-        Background = new SolidColorBrush(Color.FromRgb(246, 248, 251));
-        FontFamily = new FontFamily("Segoe UI");
-        Content = BuildLayout();
-        UpdateSelectedModelStatus();
-        _status.Text = "Нажмите «Подготовка к работе»: DSR настроит Python, загрузит и проверит модели.";
-        _convert.Click += async (_, _) => await ConvertAsync();
-        _prepareButton.Click += async (_, _) => await PrepareAsync();
-        _gpuTest.Click += async (_, _) => await CheckGpuAsync();
-        _resourceTimer.Tick += async (_, _) => await UpdateResourceUsageAsync();
-        _resourceTimer.Start();
-        Closed += (_, _) => _resourceTimer.Stop();
-        _resourceTimer.Tick += (_, _) => UpdateResourceSizeStatus();
-        _ = UpdateResourceUsageAsync();
-    }
-
-    private UIElement BuildLayout()
-    {
-        var outer = new DockPanel { Margin = new Thickness(26) };
+        InitializeComponent();
+        foreach (var model in new[] { "turbo3.1", "turbo3", "turbo2", "big_poetry", "tiny" }) _model.Items.Add(model);
+        _model.SelectedIndex = 0;
+        _model.SelectionChanged += (_, _) => UpdateSelectedModelStatus();
+        _device.Items.Add("CPU");
+        _device.SelectedIndex = 0;
+        BrowseInputButton.Click += (_, _) => SelectInput();
+        BrowseOutputButton.Click += (_, _) => SelectOutput();
+        _clearCacheButton.Click += (_, _) => ClearCache();
         if (!CanWriteToApplicationDirectory())
         {
             _clearCacheButton.IsEnabled = false;
@@ -74,85 +65,20 @@ internal sealed class MainWindow : Window
             _convert.IsEnabled = false;
             _status.Text = "Папка приложения недоступна для записи. Переместите DSR.exe в папку с правами записи (например, не в Program Files).";
         }
-        var header = new StackPanel { Margin = new Thickness(0, 0, 0, 16) };
-        header.Children.Add(new TextBlock { Text = "Расстановка ударений в FB2 и TXT", FontSize = 25, FontWeight = FontWeights.SemiBold, Foreground = new SolidColorBrush(Color.FromRgb(32, 48, 70)) });
-        header.Children.Add(new TextBlock { Text = "Создайте копию книги с ударениями. Исходный файл не изменяется.", Margin = new Thickness(0, 5, 0, 0), Foreground = Brushes.DimGray });
-        DockPanel.SetDock(header, Dock.Top);
-        outer.Children.Add(header);
-
-        var footer = new StackPanel { Margin = new Thickness(0, 12, 0, 0) };
-        DockPanel.SetDock(footer, Dock.Bottom);
-        footer.Children.Add(BuildResourcePanel());
-        footer.Children.Add(_modelStatus);
-        footer.Children.Add(_resourceSizeStatus);
-        footer.Children.Add(_status);
-        footer.Children.Add(_progress);
-        var actions = new DockPanel { Margin = new Thickness(0, 12, 0, 0) };
-        _clearCacheButton.Click += (_, _) => ClearCache();
-        DockPanel.SetDock(_clearCacheButton, Dock.Left);
-        actions.Children.Add(_clearCacheButton);
-        _prepareButton.Margin = new Thickness(12, 0, 0, 0);
-        DockPanel.SetDock(_prepareButton, Dock.Left);
-        actions.Children.Add(_prepareButton);
-        DockPanel.SetDock(_convert, Dock.Right);
-        actions.Children.Add(_convert);
-        footer.Children.Add(actions);
-        outer.Children.Add(footer);
-
-        var content = new StackPanel();
-        content.Children.Add(Section("1. Файл книги", BuildFilePanel()));
-        content.Children.Add(Section("2. Куда сохранить результат", BuildOutputPanel()));
-        content.Children.Add(Section("3. Параметры обработки", BuildModelPanel()));
-        var scroll = new ScrollViewer { Content = content, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
-        outer.Children.Add(scroll);
-        return outer;
-    }
-
-    private UIElement BuildFilePanel()
-    {
-        var row = new DockPanel();
-        var browse = new Button { Content = "Выбрать FB2 или TXT…", Padding = new Thickness(12, 7, 12, 7) };
-        browse.Click += (_, _) => SelectInput();
-        DockPanel.SetDock(browse, Dock.Right);
-        row.Children.Add(browse);
-        _input.Margin = new Thickness(0, 0, 10, 0);
-        row.Children.Add(_input);
-        return row;
-    }
-
-    private UIElement BuildOutputPanel()
-    {
-        var panel = new StackPanel();
-        var row = new DockPanel();
-        var browse = new Button { Content = "Путь…", Padding = new Thickness(12, 7, 12, 7) };
-        browse.Click += (_, _) => SelectOutput();
-        DockPanel.SetDock(browse, Dock.Right);
-        row.Children.Add(browse);
-        row.Children.Add(_output);
-        panel.Children.Add(row);
-        panel.Children.Add(new TextBlock { Text = "По умолчанию результат сохраняется рядом с исходником: «Имя_ударения.fb2» для FB2 или «Имя_ударения.txt» для TXT. Формат входа и выхода должен совпадать.", Margin = new Thickness(0, 7, 0, 0), Foreground = Brushes.DimGray, TextWrapping = TextWrapping.Wrap });
-        return panel;
-    }
-
-    private UIElement BuildModelPanel()
-    {
-        var panel = new StackPanel();
-        var row = new WrapPanel { VerticalAlignment = VerticalAlignment.Center };
-        row.Children.Add(new TextBlock { Text = "Модель ударений:", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 8, 0) });
-        foreach (var model in new[] { "turbo3.1", "turbo3", "turbo2", "big_poetry", "tiny" }) _model.Items.Add(model);
-        _model.SelectedIndex = 0;
-        _model.SelectionChanged += (_, _) => UpdateSelectedModelStatus();
-        row.Children.Add(_model);
-        row.Children.Add(new TextBlock { Text = "Устройство:", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(18, 0, 8, 0) });
-        _device.Items.Add("CPU");
-        _device.SelectedIndex = 0;
-        row.Children.Add(_device);
-        row.Children.Add(_gpuTest);
-        panel.Children.Add(row);
-        panel.Children.Add(_gpuStatus);
-        panel.Children.Add(_illustrations);
-        panel.Children.Add(new TextBlock { Text = "Выбор модели меняет только модель омографов; общая модель ударений и дополнительные модели загружаются отдельно. Turbo — универсальные; big_poetry — крупнее и ориентирована на стихи; tiny — облегчённая. CUDA использует ONNX Runtime. Галочка выше сохраняет иллюстрации FB2.", Margin = new Thickness(0, 8, 0, 0), Foreground = Brushes.DimGray, TextWrapping = TextWrapping.Wrap });
-        return panel;
+        UpdateSelectedModelStatus();
+        _status.Text = "Нажмите «Подготовка к работе»: DSR настроит Python, загрузит и проверит модели.";
+        _convert.Click += async (_, _) => await ConvertAsync();
+        _pauseConversion.Click += (_, _) => ToggleConversionPause();
+        _stopConversion.Click += (_, _) => StopConversion();
+        _reviewWords.Click += (_, _) => OpenWordReview();
+        UpdateReviewButton();
+        _prepareButton.Click += async (_, _) => await PrepareAsync();
+        _gpuTest.Click += async (_, _) => await CheckGpuAsync();
+        _resourceTimer.Tick += async (_, _) => await UpdateResourceUsageAsync();
+        _resourceTimer.Start();
+        Closed += (_, _) => _resourceTimer.Stop();
+        _resourceTimer.Tick += (_, _) => UpdateResourceSizeStatus();
+        _ = UpdateResourceUsageAsync();
     }
 
     private void UpdateSelectedModelStatus()
@@ -202,33 +128,6 @@ internal sealed class MainWindow : Window
         var unit = 0;
         while (size >= 1024 && unit < units.Length - 1) { size /= 1024; unit++; }
         return $"{size:0.##} {units[unit]}";
-    }
-
-    private UIElement BuildResourcePanel()
-    {
-        var panel = new Grid { Margin = new Thickness(0, 0, 0, 10) };
-        panel.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(48) });
-        panel.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        panel.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(170) });
-        for (var row = 0; row < 3; row++) panel.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        AddResourceRow(panel, 0, "CPU", _cpuUsage, _cpuLabel);
-        AddResourceRow(panel, 1, "ОЗУ", _memoryUsage, _memoryLabel);
-        AddResourceRow(panel, 2, "GPU", _gpuUsage, _gpuLabel);
-        return new GroupBox { Header = "Загрузка ресурсов", Content = panel, Padding = new Thickness(10), FontWeight = FontWeights.SemiBold };
-    }
-
-    private static void AddResourceRow(Grid grid, int row, string name, ProgressBar bar, TextBlock label)
-    {
-        var title = new TextBlock { Text = name, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 2, 8, 2) };
-        Grid.SetRow(title, row);
-        grid.Children.Add(title);
-        bar.Margin = new Thickness(0, 4, 10, 4);
-        Grid.SetRow(bar, row);
-        Grid.SetColumn(bar, 1);
-        grid.Children.Add(bar);
-        Grid.SetRow(label, row);
-        Grid.SetColumn(label, 2);
-        grid.Children.Add(label);
     }
 
     private async Task UpdateResourceUsageAsync()
@@ -346,12 +245,6 @@ internal sealed class MainWindow : Window
         double MemoryUsedGb, double MemoryTotalGb, double GpuPercent, double GpuMemoryUsedMb,
         double GpuMemoryTotalMb, double GpuMemoryPercent, bool GpuHasUtilization, bool GpuAvailable);
 
-    private static UIElement Section(string title, UIElement child)
-    {
-        var group = new GroupBox { Header = title, Content = child, Padding = new Thickness(14), Margin = new Thickness(0, 0, 0, 12), FontWeight = FontWeights.SemiBold };
-        return group;
-    }
-
     private void SelectInput()
     {
         var dialog = new OpenFileDialog { Filter = "Книги и тексты (*.fb2;*.txt)|*.fb2;*.txt|FictionBook (*.fb2)|*.fb2|Текстовые файлы (*.txt)|*.txt", CheckFileExists = true };
@@ -367,6 +260,7 @@ internal sealed class MainWindow : Window
             return;
         }
         _output.Text = Path.Combine(Path.GetDirectoryName(_loadedFile)!, Path.GetFileNameWithoutExtension(_loadedFile) + "_ударения" + extension);
+        UpdateReviewButton();
         if (extension.Equals(".txt", StringComparison.OrdinalIgnoreCase))
         {
             _status.Text = "TXT открыт. Строки и структура файла будут сохранены.";
@@ -383,7 +277,11 @@ internal sealed class MainWindow : Window
         var filter = extension.Equals(".txt", StringComparison.OrdinalIgnoreCase) ? "Текстовый файл (*.txt)|*.txt" : "Книга FictionBook (*.fb2)|*.fb2";
         var dialog = new SaveFileDialog { Filter = filter, DefaultExt = extension, AddExtension = true, FileName = Path.GetFileName(_output.Text) };
         if (!string.IsNullOrWhiteSpace(_output.Text)) dialog.InitialDirectory = Path.GetDirectoryName(_output.Text);
-        if (dialog.ShowDialog(this) == true) _output.Text = dialog.FileName;
+        if (dialog.ShowDialog(this) == true)
+        {
+            _output.Text = dialog.FileName;
+            UpdateReviewButton();
+        }
     }
 
     // Гарантирует, что окружение Python готово до начала конвертации, и показывает
@@ -479,6 +377,20 @@ internal sealed class MainWindow : Window
         var device = _device.SelectedItem?.ToString() ?? "CPU";
         var includeImages = _illustrations.IsChecked == true;
         SetBusy(true);
+        _conversionControl = new Program.ConversionControl();
+        _pauseConversion.IsEnabled = true;
+        _stopConversion.IsEnabled = true;
+        _pauseConversion.Content = "Пауза";
+        _diagnosticsPath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(output))!, Path.GetFileNameWithoutExtension(output) + "_статистика.txt");
+        var conversionWatch = Stopwatch.StartNew();
+        var totalUnits = 0;
+        var sourceBytes = new FileInfo(input).Length;
+        var sourceCharacters = new FileInfo(input).Length;
+        if (Path.GetExtension(input).Equals(".txt", StringComparison.OrdinalIgnoreCase))
+        {
+            try { sourceCharacters = File.ReadAllText(input).Length; } catch (IOException) { }
+        }
+        _conversionStats.Text = $"Файл: {sourceBytes / 1024d / 1024d:0.00} МБ · около {sourceCharacters:N0} символов · прошло 00:00:00 · осталось —";
         _modelStatus.Text = $"Загружается модель омографов {model}; размер будет показан во время скачивания…";
         _status.Text = $"Готовлю Python-компоненты; модель омографов: {model} ({device}).";
         _progress.Value = 0;
@@ -487,6 +399,16 @@ internal sealed class MainWindow : Window
             await Task.Run(() => Program.ConvertInteractive(input, output, model, device, includeImages,
                 message => Dispatcher.Invoke(() =>
                 {
+                    if (message.StartsWith("DIAGNOSTICS:", StringComparison.Ordinal))
+                    {
+                        _diagnosticsPath = Path.Combine(Path.GetDirectoryName(message["DIAGNOSTICS:".Length..])!, Path.GetFileNameWithoutExtension(message["DIAGNOSTICS:".Length..]) + "_статистика.txt");
+                        return;
+                    }
+                    if (message.StartsWith("DSR_PERF:", StringComparison.Ordinal))
+                    {
+                        _conversionStats.Text = message;
+                        return;
+                    }
                     if (message.StartsWith("Загрузка модели ", StringComparison.Ordinal)
                         || message.StartsWith("Подготовка модели ", StringComparison.Ordinal)
                         || message.StartsWith("Модель ", StringComparison.Ordinal))
@@ -522,21 +444,88 @@ internal sealed class MainWindow : Window
                 }),
                 (completed, total) => Dispatcher.Invoke(() =>
                 {
+                    totalUnits = total;
                     _progress.IsIndeterminate = false;
                     _progress.Value = total == 0 ? 100 : completed * 100.0 / total;
+                    var remaining = completed > 0 ? TimeSpan.FromSeconds(conversionWatch.Elapsed.TotalSeconds * Math.Max(0, total - completed) / completed) : (TimeSpan?)null;
                     _status.Text = $"Обработка текста: {completed:N0} из {total:N0} фрагментов ({_progress.Value:0}%).";
-                })));
+                    _conversionStats.Text = $"Файл: {sourceBytes / 1024d / 1024d:0.00} МБ · около {sourceCharacters:N0} символов · прошло {FormatElapsed(conversionWatch.Elapsed)} · осталось {(remaining.HasValue ? FormatElapsed(remaining.Value) : "расчёт…")}";
+                }), _conversionControl!));
+            conversionWatch.Stop();
+            _conversionStats.Text = $"Файл: {sourceBytes / 1024d / 1024d:0.00} МБ · около {sourceCharacters:N0} символов · обработано {totalUnits:N0} фрагментов за {FormatElapsed(conversionWatch.Elapsed)} · отчёт слов рядом с исходником";
             _status.Text = "Конвертация завершена: " + output;
+            UpdateReviewButton();
+            if (Path.GetExtension(output).Equals(".fb2", StringComparison.OrdinalIgnoreCase) && _reviewWords.IsEnabled)
+            {
+                var reviewPath = Program.ReviewPathFor(output);
+                new WordReviewWindow(reviewPath, output) { Owner = this }.ShowDialog();
+                UpdateReviewButton();
+            }
             UpdateResourceSizeStatus();
             if (MessageBox.Show(this, "Книга готова. Открыть папку с результатом?", "Готово", MessageBoxButton.YesNo, MessageBoxImage.Information) == MessageBoxResult.Yes)
                 System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", $"/select,\"{output}\"") { UseShellExecute = true });
         }
+        catch (OperationCanceledException)
+        {
+            conversionWatch.Stop();
+            _status.Text = "Обработка остановлена. Отчёт диагностики сохранён рядом с выходным файлом.";
+            _conversionStats.Text = $"Остановлено через {FormatElapsed(conversionWatch.Elapsed)} · отчёт: {_diagnosticsPath}";
+        }
         catch (Exception ex)
         {
             Program.LogError($"Ошибка конвертации файла: {input} -> {output}", ex);
-            _status.Text = "Ошибка: " + ex.GetBaseException().Message + $"\nПодробности: {Program.LogFilePath}";
+            _status.Text = "Ошибка: " + ex.GetBaseException().Message + $"\nПодробности: {Program.LogFilePath}\nОтчёт: {_diagnosticsPath}";
         }
-        finally { SetBusy(false); }
+        finally
+        {
+            _conversionControl = null;
+            _pauseConversion.IsEnabled = false;
+            _stopConversion.IsEnabled = false;
+            _pauseConversion.Content = "Пауза";
+            SetBusy(false);
+        }
+    }
+
+    private void ToggleConversionPause()
+    {
+        if (_conversionControl == null) return;
+        if (_conversionControl.IsPaused)
+        {
+            _conversionControl.Resume();
+            _pauseConversion.Content = "Пауза";
+            _status.Text = "Обработка продолжается…";
+        }
+        else
+        {
+            _conversionControl.Pause();
+            _pauseConversion.Content = "Продолжить";
+            _status.Text = "Обработка приостановлена. Нажмите «Продолжить» или «Стоп».";
+        }
+    }
+
+    private void UpdateReviewButton()
+    {
+        var outputPath = _output.Text;
+        var hasOutput = !string.IsNullOrWhiteSpace(outputPath) && Path.GetExtension(outputPath).Equals(".fb2", StringComparison.OrdinalIgnoreCase);
+        var reviewPath = hasOutput ? Program.ReviewPathFor(outputPath) : null;
+        _reviewWords.Tag = hasOutput ? (reviewPath!, outputPath) : null;
+        // Окно ручной правки само позволяет выбрать оба файла, поэтому кнопку
+        // можно открыть и до конвертации/наличия отчёта.
+        _reviewWords.IsEnabled = true;
+    }
+
+    private void OpenWordReview()
+    {
+        var window = new WordReviewWindow(_reviewWords.Tag is ValueTuple<string, string> paths ? paths.Item1 : null,
+            _reviewWords.Tag is ValueTuple<string, string> outputPaths ? outputPaths.Item2 : null) { Owner = this };
+        window.ShowDialog();
+        UpdateReviewButton();
+    }
+
+    private void StopConversion()
+    {
+        _conversionControl?.Stop();
+        _status.Text = "Останавливаю после текущего фрагмента…";
     }
 
     private async Task PrepareAsync()
@@ -592,6 +581,13 @@ internal sealed class MainWindow : Window
                 _clearCacheButton.IsEnabled = false;
             }
         }
+    }
+
+    private static string FormatElapsed(TimeSpan elapsed)
+    {
+        if (elapsed < TimeSpan.Zero) elapsed = TimeSpan.Zero;
+        var totalHours = (long)elapsed.TotalHours;
+        return $"{totalHours:00}:{elapsed.Minutes:00}:{elapsed.Seconds:00}";
     }
 
     private void SetBusy(bool busy)

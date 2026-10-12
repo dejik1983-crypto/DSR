@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <OutputType>Exe</OutputType>
+    <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
     <UseWPF>true</UseWPF>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
@@ -25,6 +25,11 @@
     <DeepReaderProjectPath Condition="'$(DeepReaderProjectPath)' == ''">$(MSBuildThisFileDirectory)..\DeepReader_x64 V*Beta Bionic\DeepReader.csproj</DeepReaderProjectPath>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Remove="publish\**\*.cs" />
+    <Page Remove="publish\**\*.xaml" />
+    <Compile Remove="_logtest\**\*.cs" />
+    <Page Remove="_logtest\**\*.xaml" />
+    <Compile Remove="WordReviewWindow.cs" />
     <ProjectReference Include="$(DeepReaderProjectPath)" AdditionalProperties="SelfContained=true;RuntimeIdentifier=win-x64" />
     <EmbeddedResource Include="ruaccent_worker.py" LogicalName="DSR.ruaccent_worker.py" />
     <EmbeddedResource Include="requirements.txt" LogicalName="DSR.requirements.txt" />
