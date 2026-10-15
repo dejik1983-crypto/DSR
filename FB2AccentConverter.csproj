@@ -9,9 +9,9 @@
     <LangVersion>latest</LangVersion>
     <AssemblyName>DSR</AssemblyName>
     <RootNamespace>FB2AccentConverter</RootNamespace>
-    <Version>1.1.1</Version>
-    <AssemblyVersion>1.1.1.0</AssemblyVersion>
-    <FileVersion>1.1.1.0</FileVersion>
+    <Version>1.1.2</Version>
+    <AssemblyVersion>1.1.2.0</AssemblyVersion>
+    <FileVersion>1.1.2.0</FileVersion>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>true</SelfContained>
     <PublishSingleFile>true</PublishSingleFile>
@@ -33,5 +33,6 @@
     <ProjectReference Include="$(DeepReaderProjectPath)" AdditionalProperties="SelfContained=true;RuntimeIdentifier=win-x64" />
     <EmbeddedResource Include="ruaccent_worker.py" LogicalName="DSR.ruaccent_worker.py" />
     <EmbeddedResource Include="requirements.txt" LogicalName="DSR.requirements.txt" />
+    <Content Include="dictionary\*.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

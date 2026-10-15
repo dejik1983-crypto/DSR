@@ -111,7 +111,7 @@ public sealed partial class WordReviewWindow : Window
 
     private void ChooseFb2_Click(object sender, RoutedEventArgs e)
     {
-        var dialog = new OpenFileDialog { Title = "Выберите FB2 для ручной коррекции", Filter = "Книга FictionBook (*.fb2)|*.fb2", CheckFileExists = true };
+        var dialog = new OpenFileDialog { Title = "Выберите FB2 или TXT для ручной коррекции", Filter = "Книги и тексты (*.fb2;*.txt)|*.fb2;*.txt|Книга FictionBook (*.fb2)|*.fb2|Текстовый файл (*.txt)|*.txt", CheckFileExists = true };
         if (dialog.ShowDialog(this) != true) return;
         _outputPath = dialog.FileName;
         Fb2FileTextBox.Text = _outputPath;
@@ -219,7 +219,7 @@ public sealed partial class WordReviewWindow : Window
                 var correction = CorrectionTextFor(pairs[0].entry);
                 return (pairs[0].entry, correction, pairs.Select(pair => pair.entry).ToArray());
             })
-            .Where(item => item.Correction.Length > 0 && Program.IsValidCorrection(item.Entry.Word, item.Correction))
+            .Where(item => item.Correction.Length > 0 && (Program.IsValidCorrection(item.Entry.Word, item.Correction) || Program.IsValidTypoCorrection(item.Entry.Word, item.Correction)))
             .ToList();
     }
 
@@ -227,8 +227,10 @@ public sealed partial class WordReviewWindow : Window
     {
         if (string.IsNullOrWhiteSpace(entry.Proposed)) return string.Empty;
         var proposed = entry.Proposed.Trim().Replace("ё\u0301", "ё", StringComparison.OrdinalIgnoreCase);
-        // Только вариант с ударением или ё считается осознанной правкой: он попадает в пакет.
-        return proposed.Contains('\u0301') || proposed.Contains('ё', StringComparison.OrdinalIgnoreCase) ? proposed : string.Empty;
+        // Вариант с ударением или ё — осознанная правка; также считаем правкой вариант с изменёнными буквами (опечатка).
+        return proposed.Contains('\u0301') || proposed.Contains('ё', StringComparison.OrdinalIgnoreCase)
+            || !Program.NormalizeWordLettersForReview(proposed).Equals(Program.NormalizeWordLettersForReview(entry.Word), StringComparison.OrdinalIgnoreCase)
+            ? proposed : string.Empty;
     }
 
     private void ApplyGroupCorrection()
@@ -242,16 +244,17 @@ public sealed partial class WordReviewWindow : Window
         }
         if (string.IsNullOrWhiteSpace(_reviewPath) || string.IsNullOrWhiteSpace(_outputPath) || !File.Exists(_outputPath))
         {
-            MessageBox.Show(this, "Выберите файл отчёта и редактируемый FB2.", "Нужны файлы", MessageBoxButton.OK, MessageBoxImage.Warning);
+            MessageBox.Show(this, "Выберите файл отчёта и редактируемый FB2 или TXT.", "Нужны файлы", MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
         }
         var sourcePath = _outputPath;
         var correctedPath = GetCorrectedOutputPath(sourcePath);
+        var isText = Path.GetExtension(sourcePath).Equals(".txt", StringComparison.OrdinalIgnoreCase);
         try
         {
             ConfirmOutputPath(sourcePath, correctedPath, "Перезапись corrected-файла");
             if (!string.Equals(correctedPath, sourcePath, StringComparison.OrdinalIgnoreCase) && File.Exists(correctedPath) &&
-                MessageBox.Show(this, $"Файл результата уже существует:\n{correctedPath}\n\nПересоздать его из выбранного исходного FB2?", "Пересоздание corrected-файла", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
+                MessageBox.Show(this, $"Файл результата уже существует:\n{correctedPath}\n\nПересоздать его из выбранного исходного файла?", "Пересоздание corrected-файла", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
             var pattern = new List<Program.WordReviewPatternCorrection>();
             foreach (var group in edited)
             {
@@ -259,7 +262,7 @@ public sealed partial class WordReviewWindow : Window
                 if (excluded.Length == 0) pattern.Add(new Program.WordReviewPatternCorrection(group.Entry.Word, group.Correction, null, -1));
                 else pattern.AddRange(excluded.Select(item => new Program.WordReviewPatternCorrection(group.Entry.Word, group.Correction, item.Context, item.ContextOccurrence)));
             }
-            var replacements = pattern.Count == 0 ? 0 : Program.ApplyReviewPatternCorrectionsToFb2(sourcePath, correctedPath, pattern);
+            var replacements = pattern.Count == 0 ? 0 : (isText ? Program.ApplyReviewPatternCorrectionsToTextFile(sourcePath, correctedPath, pattern) : Program.ApplyReviewPatternCorrectionsToFb2(sourcePath, correctedPath, pattern));
             if (pattern.Count > 0)
             {
                 _outputPath = correctedPath;
@@ -273,7 +276,7 @@ public sealed partial class WordReviewWindow : Window
                     _outputPath = correctedPath;
                     Fb2FileTextBox.Text = correctedPath;
                 }
-                replacements += Program.ApplyWordCorrectionsToFb2(_outputPath, _outputPath, savedForms);
+                replacements += (isText ? Program.ApplyWordCorrectionsToTextFile(_outputPath, _outputPath, savedForms) : Program.ApplyWordCorrectionsToFb2(_outputPath, _outputPath, savedForms));
             }
             _wordCounts = Program.CountReviewWordOccurrences(_outputPath, _entries.Select(item => item.Word));
             foreach (var group in edited)
@@ -580,9 +583,9 @@ public sealed partial class WordReviewWindow : Window
         var proposed = CorrectionTextBox.Text.Trim().Replace("ё\u0301", "ё", StringComparison.OrdinalIgnoreCase);
         // Пустое поле тоже принимается: тогда используется ударение, показанное подсказкой.
         if (proposed.Length == 0) proposed = DefaultInitialStress(entry.Word);
-        if (!Program.IsValidCorrection(entry.Word, proposed))
+        if (!Program.IsValidCorrection(entry.Word, proposed) && !Program.IsValidTypoCorrection(entry.Word, proposed))
         {
-            MessageBox.Show(this, "Не удалось подтвердить ударение: проверьте, что в поле стоит то же слово с одним знаком ударения или с «ё».", "Проверьте ударение", MessageBoxButton.OK, MessageBoxImage.Warning);
+            MessageBox.Show(this, "Не удалось подтвердить правку: в поле должно стоять то же слово с одним знаком ударения, слово с «ё» либо исправленная опечатка (не более 3 отличий от исходного слова).", "Проверьте правку", MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
         }
         foreach (var item in GetSelectedGroup()) item.Proposed = proposed;
@@ -674,7 +677,8 @@ public sealed partial class WordReviewWindow : Window
                 MessageBox.Show(this, $"Файл уже существует:\n{correctedPath}\n\nПересоздать его из выбранного FB2?", "Пересоздание corrected-файла", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
             var corrections = saved.GroupBy(item => Program.NormalizeWordLettersForReview(item.Form), StringComparer.OrdinalIgnoreCase).Select(group => group.First()).ToList();
             if (!string.Equals(correctedPath, sourcePath, StringComparison.OrdinalIgnoreCase)) File.Copy(sourcePath, correctedPath, overwrite: true);
-            var count = Program.ApplyWordCorrectionsToFb2(sourcePath, correctedPath, corrections);
+            var isText = Path.GetExtension(sourcePath).Equals(".txt", StringComparison.OrdinalIgnoreCase);
+            var count = isText ? Program.ApplyWordCorrectionsToTextFile(sourcePath, correctedPath, corrections) : Program.ApplyWordCorrectionsToFb2(sourcePath, correctedPath, corrections);
             _outputPath = correctedPath;
             Fb2FileTextBox.Text = correctedPath;
             RefreshWordCounts();

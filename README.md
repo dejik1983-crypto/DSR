@@ -1,7 +1,7 @@
 # DSR — FB2 Accent Converter
-[![Версия](https://img.shields.io/badge/version-1.1.1-blue)](https://github.com/dejik1983-crypto/DSR/releases)
+[![Версия](https://img.shields.io/badge/version-1.1.2-blue)](https://github.com/dejik1983-crypto/DSR/releases)
 
-**Версия: 1.1.1** · [История изменений](CHANGELOG.md) · [Лицензия MIT](LICENSE)
+**Версия: 1.1.2** · [История изменений](CHANGELOG.md) · [Лицензия MIT](LICENSE)
 
 Готовый файл называется `DSR.exe`. Всё, что программа скачивает или создаёт при первом запуске (окружение Python, скрипты, кэши, модели), хранится в папке `ресурсы` рядом с `DSR.exe`; размер ресурсов отображается в окне программы. Папку можно удалить без вреда — программа создаст её заново при подготовке.
 

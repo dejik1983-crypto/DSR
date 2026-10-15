@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -12,11 +12,29 @@ namespace FB2AccentConverter;
 
 internal static class Program
 {
+    // Windows-1251 нужна для чтения и записи TXT без BOM, но в .NET она доступна
+    // только через провайдер кодовых страниц. Без регистрации Encoding.GetEncoding(1251)
+    // бросает «No data is available for encoding 1251». Статический конструктор
+    // выполняется раньше Main, поэтому провайдер доступен и в CLI, и в окне.
+    static Program() => Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+
     private static readonly System.Text.RegularExpressions.Regex RuAccentMarker = new(
         "\\+(?=[а-яёА-ЯЁ])", System.Text.RegularExpressions.RegexOptions.Compiled | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
     private static readonly object LogLock = new();
     private static readonly System.Text.RegularExpressions.Regex PunctuationTokens = new(
         @"[\p{L}\p{M}\p{N}_]+|[^\p{L}\p{M}\p{N}_]+", System.Text.RegularExpressions.RegexOptions.Compiled | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+    // Safety net (C# side of the ruaccent worker protection). Even if the Python
+    // worker leaves a stray combining acute mark, these rules guarantee that:
+    //  • a combining accent never stays adjacent to the letter ё (ё is always stressed);
+    //  • a short function word (preposition/conjunction/particle) never carries stress.
+    private static readonly HashSet<string> UnstressedWords = new(StringComparer.OrdinalIgnoreCase)
+    {
+        // Prepositions
+        "о", "об", "обо", "в", "во", "с", "со", "к", "ко", "у", "от", "до", "из",
+        "без", "для", "про", "над", "под", "при", "на", "за",
+        // Conjunctions and particles
+        "и", "а", "но", "да", "ли", "бы", "же", "ль",
+    };
     // Подробный журнал правок: помогает разобрать, почему конкретная книга не применилась.
     internal static string ReviewLogPath => Path.Combine(DataDirectory, "DSR-правила.log");
 
@@ -41,10 +59,12 @@ internal static class Program
         "[аеёиоуыэюя]", System.Text.RegularExpressions.RegexOptions.Compiled | System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
     internal static string LogFilePath => Path.Combine(DataDirectory, "DSR-errors.txt");
     internal static string UserDictionaryPath => Path.Combine(DataDirectory, "пользовательские-ударения.tsv");
+    internal static string YoDictionaryPath => Path.Combine(ApplicationDirectory, "dictionary", "ё.txt");
     internal static string TrainingLogPath => Path.Combine(DataDirectory, "накопленные-примеры.jsonl");
     internal static string CorrectionsFor(string reviewPath) => Path.Combine(Path.GetDirectoryName(Path.GetFullPath(reviewPath))!, Path.GetFileNameWithoutExtension(reviewPath).Replace("_проверка-слов", "_исправления") + ".txt");
     internal static string ReviewPathFor(string inputPath) => Path.Combine(Path.GetDirectoryName(Path.GetFullPath(inputPath))!, Path.GetFileNameWithoutExtension(inputPath) + "_проверка-слов.txt");
     private static readonly Lazy<Dictionary<string, string>> UserDictionary = new(LoadUserDictionary);
+    private static readonly Lazy<Dictionary<string, string>> YoDictionary = new(LoadYoDictionary);
     internal static string FormCorrectionsPathFor(string reviewPath) => Path.Combine(Path.GetDirectoryName(Path.GetFullPath(reviewPath))!, Path.GetFileNameWithoutExtension(reviewPath).Replace("_проверка-слов", "_формы") + ".json");
 
     internal static void LogError(string context, Exception exception)
@@ -106,7 +126,7 @@ internal static class Program
         try
         {
             Directory.CreateDirectory(DataDirectory);
-            var line = $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss zzz}] {status}: {input} | {bytes / 1024d / 1024d:0.00} МБ | {characters:N0} символов | обработка {elapsed:hh\\:mm\\:ss} | осталось {(estimatedRemaining.HasValue ? estimatedRemaining.Value.ToString(@"hh\\:mm\\:ss") : "н/д")}{Environment.NewLine}";
+            var line = $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss zzz}] {status}: {input} | {bytes / 1024d / 1024d:0.00} МБ | {characters:N0} символов | обработка {elapsed:hh\\:mm\\:ss} | осталось {(estimatedRemaining.HasValue ? estimatedRemaining.Value.ToString("hh\\:mm\\:ss") : "н/д")}{Environment.NewLine}";
             lock (LogLock) File.AppendAllText(Path.Combine(DataDirectory, "DSR-processing.log"), line, new UTF8Encoding(false));
         }
         catch (Exception) { }
@@ -507,7 +527,7 @@ internal static class Program
         report.AppendLine($"Символов внутри FB2 binary/изображений (пропущено): {diagnostics.ImagePayloadCharacterCount:N0}");
         report.AppendLine($"Обработано фрагментов: {diagnostics.CompletedUnits:N0}/{diagnostics.TotalUnits:N0}");
         report.AppendLine($"Ошибок отдельных фрагментов: {diagnostics.FailedUnits:N0}");
-        report.AppendLine($"Слов в отчёте проверки: {diagnostics.UnrecognizedWordCount:N0}");
+        report.AppendLine($"Нераспознанных слов в отчёте: {diagnostics.UnrecognizedWordCount:N0}");
         report.AppendLine($"Время обработки: {FormatDuration(diagnostics.Elapsed)}");
         report.AppendLine($"Скорость: {(diagnostics.Elapsed.TotalSeconds > 0 ? diagnostics.CharacterCount / diagnostics.Elapsed.TotalSeconds : 0):0.0} символов/с; {(diagnostics.Elapsed.TotalSeconds > 0 ? diagnostics.CompletedUnits / diagnostics.Elapsed.TotalSeconds : 0):0.00} фрагментов/с");
         report.AppendLine($"Пик RAM процесса: {diagnostics.PeakWorkingSetBytes / 1024d / 1024d:0.0} МБ");
@@ -558,8 +578,10 @@ internal static class Program
                 try
                 {
                     var modelOutput = RuAccentMarker.Replace(accentizer.Process(ApplyUserDictionary(content)), "\u0301");
-                    var accented = EnsureDialogueInitialWordAccent(content, modelOutput, accentizer);
-                    result.Append(EnsureOriginalPunctuation(content, accented));
+                    var modelProcessed = ProtectUnstressedWords(EnsureDialogueInitialWordAccent(content, modelOutput, accentizer));
+                    var modelProcessedWithPunctuation = EnsureOriginalPunctuation(content, modelProcessed);
+                    var accented = ApplyYoDictionary(modelProcessedWithPunctuation);
+                    result.Append(accented);
                     var reviewCountBefore = wordReview.Count;
                     CollectUnrecognizedWords(content, accented, wordReview);
                     diagnostics.UnrecognizedWordCount += CountReviewWords(wordReview.Skip(reviewCountBefore));
@@ -584,7 +606,7 @@ internal static class Program
                 estimatedRemaining = completed > 0
                     ? TimeSpan.FromSeconds(conversionTimer.Elapsed.TotalSeconds * (lines.Length - completed) / completed)
                     : null;
-                report($"Прогресс {completed}/{lines.Length}; прошло {conversionTimer.Elapsed:hh\\:mm\\:ss}; осталось {(estimatedRemaining.HasValue ? estimatedRemaining.Value.ToString(@"hh\\:mm\\:ss") : "расчёт…")}");
+                report($"Прогресс {completed}/{lines.Length}; прошло {conversionTimer.Elapsed:hh\\:mm\\:ss}; осталось {(estimatedRemaining.HasValue ? estimatedRemaining.Value.ToString("hh\\:mm\\:ss") : "расчёт…")}");
                 LogConversion(inputPath, bytesIn, text.Length, conversionTimer.Elapsed, estimatedRemaining, $"Обработка {completed}/{lines.Length}");
                 reportProgress(completed, lines.Length);
             }
@@ -595,7 +617,7 @@ internal static class Program
         diagnostics.OutputBytes = new FileInfo(outputPath).Length;
         diagnostics.Elapsed = conversionTimer.Elapsed;
         diagnostics.UnrecognizedWordCount = CountReviewWords(wordReview);
-        WriteWordReview(inputPath, wordReview);
+        WriteWordReview(outputPath, wordReview);
         conversionTimer.Stop();
         LogConversion(inputPath, bytesIn, text.Length, conversionTimer.Elapsed, TimeSpan.Zero, "Завершено");
         report($"Готово: {outputPath}");
@@ -657,21 +679,25 @@ internal static class Program
         var sourceMatches = WordTokens.Matches(source).Cast<System.Text.RegularExpressions.Match>().ToArray();
         var outputMatches = WordTokens.Matches(converted).Cast<System.Text.RegularExpressions.Match>().ToArray();
         if (sourceMatches.Length != outputMatches.Length) return;
-        var words = new List<string>();
+
+        var suspiciousWords = new List<string>();
         for (var i = 0; i < sourceMatches.Length; i++)
         {
             var original = sourceMatches[i].Value;
+            if (NotCyrillicWord.IsMatch(original) || NormalizeWordLetters(original).Length < 2) continue;
             var normalized = NormalizeWordLetters(original);
-            if (NotCyrillicWord.IsMatch(original) || normalized.Length < 2) continue;
+            if (!RussianVowel.IsMatch(normalized)) continue;
             var convertedWord = outputMatches[i].Value;
-            var hasStress = convertedWord.Contains('\u0301');
-            var hasYo = original.Contains('ё', StringComparison.OrdinalIgnoreCase);
-            var vowelCount = RussianVowel.Matches(normalized).Count;
-            // Ё is inherently stressed in Russian orthography. A word with one
-            // vowel has no competing stress position, so neither belongs in review.
-            if (!hasStress && !hasYo && vowelCount > 1) words.Add(original);
+            // Only a combining acute explicitly emitted by the model counts as
+            // stress; ë is self-stressed in Russian and excludes the word from review.
+            var hasExplicitStress = convertedWord.Contains('\u0301');
+            var hasYo = convertedWord.Contains('ё', StringComparison.OrdinalIgnoreCase);
+            if (!hasExplicitStress && !hasYo)
+                suspiciousWords.Add(original);
         }
-        if (words.Count > 0) report.Add($"Фрагмент: {source}{Environment.NewLine}Не распознаны: {string.Join(", ", words.Distinct(StringComparer.OrdinalIgnoreCase))}{Environment.NewLine}");
+
+        if (suspiciousWords.Count > 0)
+            report.Add($"Фрагмент: {source}{Environment.NewLine}Не распознаны: {string.Join(", ", suspiciousWords.Distinct(StringComparer.OrdinalIgnoreCase))}{Environment.NewLine}");
     }
 
     internal static List<WordReviewEntry> ReadWordReview(string path)
@@ -684,6 +710,12 @@ internal static class Program
             foreach (var line in text.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
             {
                 if (line.StartsWith("Фрагмент: ", StringComparison.Ordinal)) currentContext = line[10..];
+                else if (line.StartsWith("Не распознаны: ", StringComparison.Ordinal) && currentContext != null)
+                {
+                    var contextText = currentContext;
+                    foreach (var word in line[14..].Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                        structured.Add(new WordReviewEntry(word, contextText, word));
+                }
                 else if (line.StartsWith("Правка [", StringComparison.Ordinal) && currentContext != null)
                 {
                     var close = line.IndexOf("]: ", StringComparison.Ordinal);
@@ -736,8 +768,8 @@ internal static class Program
     internal static string FormatWordReview(IEnumerable<WordReviewEntry> entries)
     {
         var list = entries.ToArray();
-        var output = new StringBuilder("Слова без автоматически определённого ударения. Контекст приведён целым фрагментом. Исправьте вариант ниже вручную." + Environment.NewLine + Environment.NewLine);
-        if (list.Length == 0) return "Нераспознанных слов не найдено." + Environment.NewLine;
+        var output = new StringBuilder("Слова для ручной проверки: слова с русскими гласными, в которых после обработки нет явной отметки ударения и нет буквы ё. Такие слова могут быть корректными безударными в записи, неизвестными модели или опечатками; список не утверждает, что каждое слово ошибочно." + Environment.NewLine + Environment.NewLine);
+        if (list.Length == 0) return "Слов без явного ударения и без буквы ё не найдено." + Environment.NewLine;
         foreach (var group in list.GroupBy(item => SplitReviewContext(item.Context).Context))
         {
             output.AppendLine("Фрагмент: " + group.Key);
@@ -757,6 +789,39 @@ internal static class Program
         return !string.IsNullOrWhiteSpace(corrected) && !corrected.Any(char.IsWhiteSpace) &&
             NormalizeWordLetters(sourceWord).Equals(NormalizeWordLetters(corrected), StringComparison.OrdinalIgnoreCase) &&
             IsValidStressedWord(corrected);
+    }
+
+    // Typo correction: the corrected word may differ in letters from the source
+    // (unlike a stress-only correction), but must remain a valid Russian word
+    // and be close enough to the original to avoid accidental text corruption.
+    internal static bool IsValidTypoCorrection(string sourceWord, string corrected)
+    {
+        if (string.IsNullOrWhiteSpace(corrected) || corrected.Any(char.IsWhiteSpace)) return false;
+        if (!IsValidStressedWord(corrected)) return false;
+        var sourceNorm = NormalizeWordLetters(sourceWord).ToLowerInvariant();
+        var targetNorm = NormalizeWordLetters(corrected).ToLowerInvariant();
+        if (sourceNorm == targetNorm) return false; // accent-only fix — handled by IsValidCorrection
+        var distance = LevenshteinDistance(sourceNorm, targetNorm);
+        var maxEdit = Math.Max(1, Math.Min(3, sourceNorm.Length / 2));
+        return distance <= maxEdit;
+    }
+
+    private static int LevenshteinDistance(string a, string b)
+    {
+        var n = a.Length;
+        var m = b.Length;
+        if (n == 0) return m;
+        if (m == 0) return n;
+        var d = new int[n + 1, m + 1];
+        for (var i = 0; i <= n; i++) d[i, 0] = i;
+        for (var j = 0; j <= m; j++) d[0, j] = j;
+        for (var i = 1; i <= n; i++)
+            for (var j = 1; j <= m; j++)
+            {
+                var cost = a[i - 1] == b[j - 1] ? 0 : 1;
+                d[i, j] = Math.Min(Math.Min(d[i - 1, j] + 1, d[i, j - 1] + 1), d[i - 1, j - 1] + cost);
+            }
+        return d[n, m];
     }
 
     internal static bool IsValidDeclensionForm(string form) => IsValidStressedWord(form);
@@ -822,7 +887,8 @@ internal static class Program
 
     internal static void SaveUserCorrection(WordReviewEntry entry, string corrected)
     {
-        if (!IsValidCorrection(entry.Word, corrected)) throw new ArgumentException("Некорректный вариант ударения.");
+        if (!IsValidCorrection(entry.Word, corrected) && !IsValidTypoCorrection(entry.Word, corrected))
+            throw new ArgumentException("Некорректный вариант исправления.");
         Directory.CreateDirectory(DataDirectory);
         var key = NormalizeWordLetters(entry.Word).ToLowerInvariant();
         var dict = new SortedDictionary<string, string>(StringComparer.Ordinal);
@@ -875,6 +941,13 @@ internal static class Program
 
     internal static Dictionary<string, int> CountReviewWordOccurrences(string outputPath, IEnumerable<string> words)
     {
+        if (Path.GetExtension(outputPath).Equals(".txt", StringComparison.OrdinalIgnoreCase))
+            return CountReviewWordOccurrencesInText(outputPath, words);
+        return CountReviewWordOccurrencesInFb2(outputPath, words);
+    }
+
+    private static Dictionary<string, int> CountReviewWordOccurrencesInFb2(string outputPath, IEnumerable<string> words)
+    {
         var counts = words.Distinct(StringComparer.Ordinal).ToDictionary(word => word, _ => 0, StringComparer.Ordinal);
         if (!File.Exists(outputPath) || counts.Count == 0) return counts;
         var document = XDocument.Parse(DecodeXml(File.ReadAllBytes(outputPath)), LoadOptions.PreserveWhitespace);
@@ -885,6 +958,20 @@ internal static class Program
             .Where(element => element.Name.Namespace == ns && TextElements.Contains(element.Name.LocalName))
             .SelectMany(element => element.DescendantNodes().OfType<XText>())
             .Select(node => node.Value));
+        foreach (System.Text.RegularExpressions.Match match in WordTokens.Matches(text))
+        {
+            var key = NormalizeWordLetters(match.Value);
+            foreach (var word in counts.Keys.ToArray())
+                if (NormalizeWordLetters(word).Equals(key, StringComparison.OrdinalIgnoreCase)) counts[word]++;
+        }
+        return counts;
+    }
+
+    private static Dictionary<string, int> CountReviewWordOccurrencesInText(string path, IEnumerable<string> words)
+    {
+        var counts = words.Distinct(StringComparer.Ordinal).ToDictionary(word => word, _ => 0, StringComparer.Ordinal);
+        if (!File.Exists(path) || counts.Count == 0) return counts;
+        var text = DecodeText(File.ReadAllBytes(path));
         foreach (System.Text.RegularExpressions.Match match in WordTokens.Matches(text))
         {
             var key = NormalizeWordLetters(match.Value);
@@ -907,6 +994,79 @@ internal static class Program
             .Select(item => (Key: NormalizeWordLetters(item.SourceWord).ToLowerInvariant(), Context: item.ExcludedContext!, item.ExcludedOccurrence))
             .ToHashSet();
         return ApplyPatternReplacementMapToFb2(inputPath, outputPath, map, excluded);
+    }
+
+    // TXT equivalents of the FB2 pattern and word-form apply functions.
+    // They preserve the original encoding, BOM and line endings of the source file.
+    internal static int ApplyReviewPatternCorrectionsToTextFile(string inputPath, string outputPath, IEnumerable<WordReviewPatternCorrection> corrections)
+    {
+        var entries = corrections.ToArray();
+        if (entries.Length == 0) return 0;
+        var map = entries.GroupBy(item => NormalizeWordLetters(item.SourceWord).ToLowerInvariant(), StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.Last(), StringComparer.OrdinalIgnoreCase);
+        var excluded = entries.Where(item => item.ExcludedContext != null)
+            .Select(item => (Key: NormalizeWordLetters(item.SourceWord).ToLowerInvariant(), Context: item.ExcludedContext!, item.ExcludedOccurrence))
+            .ToHashSet();
+        return ApplyPatternReplacementMapToText(inputPath, outputPath, map, excluded);
+    }
+
+    internal static int ApplyWordCorrectionsToTextFile(string inputPath, string outputPath, IEnumerable<DeclensionCorrection> corrections)
+    {
+        var correctionMap = corrections.GroupBy(correction => NormalizeWordLetters(correction.Form).ToLowerInvariant(), StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.First().Form, StringComparer.OrdinalIgnoreCase);
+        return ApplyWordReplacementMapToText(inputPath, outputPath, correctionMap);
+    }
+
+    private static int ApplyPatternReplacementMapToText(string inputPath, string outputPath,
+        Dictionary<string, WordReviewPatternCorrection> correctionMap,
+        HashSet<(string Key, string Context, int ExcludedOccurrence)> excluded)
+    {
+        if (correctionMap.Count == 0) return 0;
+        LogReview($"Применение правок TXT: {Path.GetFileName(inputPath)} -> {Path.GetFileName(outputPath)}; групп слов: {correctionMap.Count}; исключённых контекстов: {excluded.Count}");
+        var sourceBytes = File.ReadAllBytes(inputPath);
+        var text = DecodeText(sourceBytes);
+        var lines = text.Split('\n');
+        var replacements = 0;
+        var excludedContexts = excluded.Where(item => item.Key.Length > 0).ToArray();
+        for (var i = 0; i < lines.Length; i++)
+        {
+            var line = lines[i];
+            var ending = line.EndsWith("\r", StringComparison.Ordinal) ? "\r" : "";
+            var content = ending.Length == 0 ? line : line[..^1];
+            var updated = WordTokens.Replace(content, match =>
+            {
+                var normalized = NormalizeWordLetters(match.Value);
+                var key = normalized.ToLowerInvariant();
+                if (!correctionMap.TryGetValue(key, out var correction)) return match.Value;
+                if (excludedContexts.Any(item => item.Key == key && item.ExcludedOccurrence >= 0 &&
+                    string.Equals(item.Context, content, StringComparison.Ordinal) && CountContextOccurrence(content, match.Index, match.Value) == item.ExcludedOccurrence)) return match.Value;
+                replacements++;
+                return correction.Corrected;
+            });
+            lines[i] = updated + ending;
+        }
+        LogReview($"Заменено вхождений в TXT: {replacements}");
+        if (replacements == 0) return 0;
+        File.WriteAllBytes(outputPath, EncodeText(string.Join("\n", lines), sourceBytes));
+        return replacements;
+    }
+
+    private static int ApplyWordReplacementMapToText(string inputPath, string outputPath, Dictionary<string, string> correctionMap)
+    {
+        if (correctionMap.Count == 0) return 0;
+        var sourceBytes = File.ReadAllBytes(inputPath);
+        var text = DecodeText(sourceBytes);
+        var replacements = 0;
+        var updated = WordTokens.Replace(text, match =>
+        {
+            var key = NormalizeWordLetters(match.Value).ToLowerInvariant();
+            if (!correctionMap.TryGetValue(key, out var corrected)) return match.Value;
+            replacements++;
+            return corrected;
+        });
+        if (replacements == 0) return 0;
+        File.WriteAllBytes(outputPath, EncodeText(updated, sourceBytes));
+        return replacements;
     }
 
     private static int ApplyPatternReplacementMapToFb2(string inputPath, string outputPath,
@@ -1317,6 +1477,57 @@ internal static class Program
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
     }
 
+    private static Dictionary<string, string> LoadYoDictionary()
+    {
+        var words = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var dictionaryDirectory = Path.Combine(ApplicationDirectory, "dictionary");
+        var dictionaryFiles = Directory.Exists(dictionaryDirectory)
+            ? Directory.EnumerateFiles(dictionaryDirectory, "*.txt")
+            : Enumerable.Empty<string>();
+        if (!dictionaryFiles.Any())
+        {
+            var projectDirectory = Path.Combine(Directory.GetCurrentDirectory(), "dictionary");
+            dictionaryFiles = Directory.Exists(projectDirectory)
+                ? Directory.EnumerateFiles(projectDirectory, "*.txt")
+                : Enumerable.Empty<string>();
+        }
+        foreach (var dictionaryFile in dictionaryFiles)
+        foreach (var line in File.ReadLines(dictionaryFile, Encoding.UTF8))
+        {
+            var word = line.Trim().TrimStart('\uFEFF');
+            if (word.Length == 0 || word.StartsWith('#') || !word.Contains('ё', StringComparison.OrdinalIgnoreCase)) continue;
+            var normalized = NormalizeWordLetters(word).ToLowerInvariant();
+            if (!words.ContainsKey(normalized)) words[normalized] = word;
+        }
+        return words;
+    }
+
+    private static string ApplyYoDictionary(string text)
+    {
+        var words = YoDictionary.Value;
+        if (words.Count == 0) return text;
+        return WordTokens.Replace(text, match =>
+        {
+            var sourceWord = match.Value;
+            var normalized = NormalizeWordLetters(sourceWord).ToLowerInvariant();
+            if (!words.TryGetValue(normalized, out var dictionaryWord)) return sourceWord;
+            var sourceLetters = sourceWord.Replace("\u0301", "", StringComparison.Ordinal);
+            var dictionaryLetters = dictionaryWord.Replace("ё", "е", StringComparison.OrdinalIgnoreCase);
+            if (!sourceLetters.Equals(dictionaryLetters, StringComparison.OrdinalIgnoreCase)) return sourceWord;
+            if (sourceWord.Any(ch => char.IsDigit(ch) || ch == '_')) return sourceWord;
+            var stressIndex = sourceWord.IndexOf('\u0301');
+            if (stressIndex >= 0 && (stressIndex == 0 || char.ToLowerInvariant(sourceWord[stressIndex - 1]) != 'е'))
+                return sourceWord;
+            // Preserve the source token's capitalization while restoring ё.
+            var replacement = dictionaryWord;
+            if (sourceWord.All(ch => !char.IsLetter(ch) || char.IsUpper(ch)))
+                replacement = replacement.ToUpperInvariant();
+            else if (char.IsUpper(sourceWord[0]))
+                replacement = char.ToUpperInvariant(replacement[0]) + replacement[1..];
+            return replacement;
+        });
+    }
+
     private static Dictionary<string, string> LoadUserDictionary()
     {
         var replacements = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -1359,7 +1570,7 @@ internal static class Program
         foreach (var block in review)
         {
             var contextPrefix = "Фрагмент: ";
-            var unknownPrefix = "Не распознаны: ";
+            var unknownPrefix = "Подозрительные ударения: ";
             var contextStart = block.IndexOf(contextPrefix, StringComparison.Ordinal);
             var unknownStart = block.IndexOf(unknownPrefix, StringComparison.Ordinal);
             if (contextStart < 0 || unknownStart < 0) continue;
@@ -1431,6 +1642,40 @@ internal static class Program
         System.Globalization.CharUnicodeInfo.GetUnicodeCategory(ch) == System.Globalization.UnicodeCategory.NonSpacingMark;
 
     internal static string NormalizeWordLettersForReview(string word) => NormalizeWordLetters(word);
+
+    // Applies the ё and function-word stress protections to an accented text run.
+    // Works token by token so only whole words are matched; the combining acute
+    // mark (U+0301) is dropped when it touches ё or when the word is a short
+    // preposition/conjunction/particle that must stay unstressed.
+    internal static string ProtectUnstressedWords(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return text;
+        return WordTokens.Replace(text, match => ProtectWord(match.Value));
+    }
+
+    private static string ProtectWord(string word)
+    {
+        if (word.IndexOf('\u0301') < 0) return word;
+        // 1) A combining accent may never sit next to ё — ё is always stressed.
+        var builder = new StringBuilder(word.Length);
+        for (var i = 0; i < word.Length; i++)
+        {
+            var ch = word[i];
+            if (ch == '\u0301')
+            {
+                var prev = builder.Length > 0 ? builder[builder.Length - 1] : '\0';
+                var next = i + 1 < word.Length ? word[i + 1] : '\0';
+                if (char.ToLowerInvariant(prev) == 'ё' || char.ToLowerInvariant(next) == 'ё')
+                    continue; // drop the accent that touches ё
+            }
+            builder.Append(ch);
+        }
+        var cleaned = builder.ToString();
+        // 2) A short function word must stay unstressed.
+        if (UnstressedWords.Contains(NormalizeWordLetters(cleaned)))
+            cleaned = cleaned.Replace("\u0301", "");
+        return cleaned;
+    }
 
     // Compare words ignoring the accent marks and the ё/е distinction.
     private static string NormalizeWordLetters(string word)
@@ -1551,13 +1796,17 @@ internal static class Program
             control?.Checkpoint();
             if (string.IsNullOrWhiteSpace(textNode.Value)) continue;
             var sourceText = textNode.Value;
+            // Apply the local ё lexicon before inference and keep replacements even
+            // if the model later adds stress marks or otherwise normalizes the word.
             // Модель загружается только при первом реальном запросе — тогда результат
             // заведомо появится, а первая загрузка не завершит процесс раньше времени.
             accentizer.EnsureStarted();
             try
             {
-                var modelOutput = RuAccentMarker.Replace(accentizer.Process(sourceText), "\u0301");
-                var accented = EnsureOriginalPunctuation(sourceText, EnsureDialogueInitialWordAccent(sourceText, modelOutput, accentizer));
+                var modelOutput = RuAccentMarker.Replace(accentizer.Process(ApplyUserDictionary(sourceText)), "\u0301");
+                var modelProcessed = ProtectUnstressedWords(EnsureDialogueInitialWordAccent(sourceText, modelOutput, accentizer));
+                var modelProcessedWithPunctuation = EnsureOriginalPunctuation(sourceText, modelProcessed);
+                var accented = ApplyYoDictionary(modelProcessedWithPunctuation);
                 var reviewCountBefore = wordReview.Count;
                 CollectUnrecognizedWords(sourceText, accented, wordReview);
                 if (diagnostics != null) diagnostics.UnrecognizedWordCount += CountReviewWords(wordReview.Skip(reviewCountBefore));
@@ -1620,7 +1869,7 @@ internal static class Program
                 conversionTimer.Stop();
                 diagnostics.Elapsed = conversionTimer.Elapsed;
             }
-            WriteWordReview(inputPath, wordReview);
+            WriteWordReview(outputPath, wordReview);
             conversionTimer.Stop();
             LogConversion(inputPath, byteCount, characterCount, conversionTimer.Elapsed, TimeSpan.Zero, "Завершено");
             Console.WriteLine($"  Узлов текста с изменениями: {changed}; исправлено пробелов на границах: {normalized}");

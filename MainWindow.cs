@@ -455,7 +455,8 @@ public sealed partial class MainWindow : Window
             _conversionStats.Text = $"Файл: {sourceBytes / 1024d / 1024d:0.00} МБ · около {sourceCharacters:N0} символов · обработано {totalUnits:N0} фрагментов за {FormatElapsed(conversionWatch.Elapsed)} · отчёт слов рядом с исходником";
             _status.Text = "Конвертация завершена: " + output;
             UpdateReviewButton();
-            if (Path.GetExtension(output).Equals(".fb2", StringComparison.OrdinalIgnoreCase) && _reviewWords.IsEnabled)
+            var outputExtension = Path.GetExtension(output);
+            if ((outputExtension.Equals(".fb2", StringComparison.OrdinalIgnoreCase) || outputExtension.Equals(".txt", StringComparison.OrdinalIgnoreCase)) && _reviewWords.IsEnabled)
             {
                 var reviewPath = Program.ReviewPathFor(output);
                 new WordReviewWindow(reviewPath, output) { Owner = this }.ShowDialog();
@@ -506,7 +507,9 @@ public sealed partial class MainWindow : Window
     private void UpdateReviewButton()
     {
         var outputPath = _output.Text;
-        var hasOutput = !string.IsNullOrWhiteSpace(outputPath) && Path.GetExtension(outputPath).Equals(".fb2", StringComparison.OrdinalIgnoreCase);
+        var extension = string.IsNullOrWhiteSpace(outputPath) ? "" : Path.GetExtension(outputPath);
+        var hasOutput = !string.IsNullOrWhiteSpace(outputPath) &&
+            (extension.Equals(".fb2", StringComparison.OrdinalIgnoreCase) || extension.Equals(".txt", StringComparison.OrdinalIgnoreCase));
         var reviewPath = hasOutput ? Program.ReviewPathFor(outputPath) : null;
         _reviewWords.Tag = hasOutput ? (reviewPath!, outputPath) : null;
         // Окно ручной правки само позволяет выбрать оба файла, поэтому кнопку

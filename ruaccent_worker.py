@@ -29,6 +29,41 @@ _DLL_DIRECTORIES = []
 WORD_RE = re.compile(r"[\w\u0400-\u052f+\u0300-\u036f]+(?:[-'’][\w\u0400-\u052f+\u0300-\u036f]+)*", re.UNICODE)
 ACCENT_RE = re.compile(r"[+\u0300-\u036f]")
 
+# Words that must never carry a stress mark — short prepositions, conjunctions
+# and particles. ruaccent sometimes marks them erroneously; this list prevents
+# that. All comparisons are case-insensitive and ё/e are normalised.
+_UNSTRESSED_WORDS: frozenset[str] = frozenset((
+    # Prepositions
+    "о", "об", "обо", "в", "во", "с", "со", "к", "ко", "у", "от", "до", "из",
+    "без", "для", "про", "над", "под", "при", "на", "за",
+    # Conjunctions / particles
+    "и", "а", "но", "да", "ли", "бы", "же", "ль", "то",
+))
+
+
+def _normalize(text: str) -> str:
+    """Lower-case and normalise ё→e, remove accent markers."""
+    return ACCENT_RE.sub("", text).casefold().replace("ё", "e").replace("Ё", "e")
+
+
+def _remove_stress_from_unstressed(text: str) -> str:
+    """Remove stress markers (+) fromЁ and from short function words."""
+    # 1) Ё is inherently stressed — remove any + before or after it.
+    #    ruaccent can produce "по+ёшь" (stress on ё) — strip the + so the
+    #    combining mark is never placed on the preceding letter.
+    #    Also remove "ё+" (ruaccent sometimes places + after the vowel).
+    result = re.sub(r"\+(?=[ёЁ])", "", text)   # + before ё
+    result = re.sub(r"([ёЁ])\+", r"\1", result)  # + after ё
+
+    # 2) Short function words (prepositions, conjunctions, particles).
+    #    Strip + from these words wherever they appear as whole tokens.
+    def _strip_word(match: re.Match) -> str:
+        word = match.group(0)
+        if _normalize(word) in _UNSTRESSED_WORDS:
+            return ACCENT_RE.sub("", word)  # remove all accent markers
+        return word
+    return WORD_RE.sub(_strip_word, result)
+
 
 def gpu_probe() -> dict:
     try:
@@ -196,7 +231,7 @@ def safe_process(accentizer, text: str) -> str:
     # disambiguating homographs). Only recover word-by-word if token alignment fails.
     result = accentizer.process_all(text)
     if words(result) == words(text) and dialogue_initial_words_preserved(text, result):
-        return result
+        return _remove_stress_from_unstressed(result)
     print("WARNING: RUAccent altered a dialogue prefix; retrying line by line.", file=sys.stderr, flush=True)
     pieces = re.split(r"(\r?\n)", text)
     recovered_lines = []
@@ -208,7 +243,7 @@ def safe_process(accentizer, text: str) -> str:
     recovered_text = "".join(recovered_lines)
     if words(recovered_text) != words(text):
         raise RuntimeError("RUAccent не сохранил исходную последовательность слов; результат отклонён.")
-    return recovered_text
+    return _remove_stress_from_unstressed(recovered_text)
 
 def dialogue_initial_words_preserved(source: str, result: str) -> bool:
     source_lines = source.splitlines()

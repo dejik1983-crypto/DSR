@@ -105,11 +105,11 @@
                     <TextBox x:Name="ReviewFileTextBox" IsReadOnly="True" MinWidth="420" />
                 </DockPanel>
                 <DockPanel Margin="0,0,0,5">
-                    <Button x:Name="ChooseFb2Button" DockPanel.Dock="Right" Content="Редактируемый FB2…" />
+                    <Button x:Name="ChooseFb2Button" DockPanel.Dock="Right" Content="Редактируемый файл…" />
                     <TextBox x:Name="Fb2FileTextBox" IsReadOnly="True" MinWidth="420" />
                 </DockPanel>
                 <DockPanel>
-                    <Button x:Name="LoadFilesButton" DockPanel.Dock="Left" Content="Открыть отчёт и FB2" Padding="10,6" Margin="0,0,10,0" />
+                    <Button x:Name="LoadFilesButton" DockPanel.Dock="Left" Content="Открыть отчёт и файл" Padding="10,6" Margin="0,0,10,0" />
                     <TextBlock x:Name="FileStatusTextBlock" TextWrapping="Wrap" Margin="0,5,0,8" Foreground="{StaticResource MutedInk}" VerticalAlignment="Center" />
                 </DockPanel>
             </StackPanel>
@@ -130,7 +130,7 @@
                     </DockPanel>
                     <TextBlock DockPanel.Dock="Top" Text="Выберите слово в верхнем списке, затем конкретный контекст ниже. Снимите флажок у контекста, чтобы исключить его из общей правки." TextWrapping="Wrap" Margin="0,0,0,8" />
                     <StackPanel DockPanel.Dock="Bottom">
-                        <Button x:Name="ApplyAllButton" Content="Применить все правки → *_corrected.fb2" IsEnabled="False" Background="{StaticResource Accent}" Foreground="White" FontWeight="SemiBold" ToolTip="Применяет все внесённые правки по группам и сохранённые словоформы за один раз" />
+                        <Button x:Name="ApplyAllButton" Content="Применить все правки → *_corrected" IsEnabled="False" Background="{StaticResource Accent}" Foreground="White" FontWeight="SemiBold" ToolTip="Применяет все внесённые правки по группам и сохранённые словоформы за один раз" />
                         <Button x:Name="OpenCorrectionsButton" Content="Открыть файл форм слов" IsEnabled="False" />
                         <DockPanel Margin="0,5">
                             <Button x:Name="NextButton" DockPanel.Dock="Right" Content="Следующее ▶" IsEnabled="False" />
@@ -172,7 +172,7 @@
                             <TextBlock Text="Правка применяется к точным совпадениям слова; отдельные предложения можно исключить флажками в списке контекстов. Правьте группы одну за другой, затем нажмите «Применить все правки»." TextWrapping="Wrap" Foreground="{StaticResource MutedInk}" Margin="0,2,0,6" />
                             <TextBlock x:Name="SelectionCountTextBlock" Margin="8,0" VerticalAlignment="Center" />
                             <TextBlock Text="УДАРЕНИЕ В СЛОВЕ" Style="{StaticResource SectionHeader}" />
-                            <TextBlock Text="Выберите ударную гласную или нажмите «ё» рядом с буквой е. Ё считается ударной автоматически. Если вариант в поле «Исправленный вариант» верный, нажмите «Да» — правка запомнится и откроется следующая группа." TextWrapping="Wrap" Foreground="{StaticResource MutedInk}" Margin="0,0,0,4" />
+                            <TextBlock Text="Выберите ударную гласную или нажмите «ё» рядом с буквой е. Ё считается ударной автоматически. Если вариант в поле «Исправленный вариант» верный, нажмите «Да» — правка запомнится и откроется следующая группа. Если в слове опечатка, исправьте буквы прямо в поле — программа примет небольшое изменение букв и применит его к тексту." TextWrapping="Wrap" Foreground="{StaticResource MutedInk}" Margin="0,0,0,4" />
                             <StackPanel x:Name="StressChoicesPanel" />
                             <TextBlock Text="ДОПОЛНИТЕЛЬНЫЕ СЛОВОФОРМЫ" Style="{StaticResource SectionHeader}" />
                             <TextBlock Text="Можно ввести форму вручную, вставить её или выбрать ударение/ё под полем." TextWrapping="Wrap" Foreground="{StaticResource MutedInk}" Margin="0,0,0,4" />
