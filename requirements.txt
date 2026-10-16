@@ -1,2 +1,4 @@
 ruaccent @ git+https://github.com/Den4ikAI/ruaccent.git@3ac0ad5f6508f6c1a4a604220042232c70a7baf9
 # Neural accent inference uses ONNX Runtime. GPU runtime is installed separately when requested.
+# Optional independent verifier is installed on demand by the application.
+

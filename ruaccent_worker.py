@@ -9,6 +9,7 @@ import re
 import warnings
 import contextlib
 import io
+from concurrent.futures import ThreadPoolExecutor
 # Keep third-party initialization warnings and native-library notices out of
 # stdout: stdout is the machine-readable JSON/JSON-lines protocol for DSR.
 import sys
@@ -17,6 +18,10 @@ import time
 # Allow an operator to tune CPU inference; cap defaults to avoid oversubscribing
 # small machines. CUDA kernels remain managed by ONNX Runtime.
 _CPU_THREADS = max(1, int(os.environ.get("DSR_CPU_THREADS", os.cpu_count() or 1)))
+# Independent text nodes are latency-bound: each one triggers many tiny ONNX
+# sessions, so a strictly sequential loop leaves cores and GPU streams idle.
+# Process several nodes concurrently to overlap tokenization and inference.
+_PIPELINE_WORKERS = max(1, int(os.environ.get("DSR_PIPELINE_WORKERS") or min(12, max(2, os.cpu_count() or 4))))
 # Set before importing ONNX Runtime; provider/session options are fixed during load.
 os.environ["OMP_NUM_THREADS"] = str(_CPU_THREADS)
 os.environ["OMP_WAIT_POLICY"] = "ACTIVE"
@@ -28,6 +33,14 @@ os.environ["OPENBLAS_NUM_THREADS"] = str(_CPU_THREADS)
 _DLL_DIRECTORIES = []
 WORD_RE = re.compile(r"[\w\u0400-\u052f+\u0300-\u036f]+(?:[-'’][\w\u0400-\u052f+\u0300-\u036f]+)*", re.UNICODE)
 ACCENT_RE = re.compile(r"[+\u0300-\u036f]")
+
+
+def _emit(line: str, stream=None) -> None:
+    # Write a whole diagnostic line atomically: pipeline workers run concurrently,
+    # and print() splits text and newline into separate writes that can interleave.
+    stream = stream or sys.stderr
+    stream.write(line + "\n")
+    stream.flush()
 
 # Words that must never carry a stress mark — short prepositions, conjunctions
 # and particles. ruaccent sometimes marks them erroneously; this list prevents
@@ -222,6 +235,166 @@ def configure_onnx_tokenizer_inputs(accentizer) -> None:
             continue
         tokenizer.model_input_names = [item.name for item in session.get_inputs()]
 
+
+# Per-word accent inference is deterministic and depends only on the word itself,
+# while a book repeats the same words many times. Caching the (single-word) result
+# removes the redundant ONNX runs and tokenizations without changing any output —
+# important on GPU, where every extra run adds launch overhead and keeps the card idle.
+_ACCENT_CACHE_ENABLED = os.environ.get("DSR_ACCENT_CACHE", "1") != "0"
+_ACCENT_CACHE = {}
+_ACCENT_CACHE_HITS = [0]
+
+
+def install_accent_cache(accentizer) -> None:
+    if not _ACCENT_CACHE_ENABLED:
+        return
+    model = getattr(accentizer, "accent_model", None)
+    if model is None:
+        return
+    original = model.put_accent
+
+    def put_accent_cached(word):
+        cached = _ACCENT_CACHE.get(word)
+        if cached is not None:
+            _ACCENT_CACHE_HITS[0] += 1
+            return cached
+        result = original(word)
+        _ACCENT_CACHE[word] = result
+        return result
+
+    model.put_accent = put_accent_cached
+
+
+# RUAccent accents words one at a time, which means thousands of tiny ONNX calls
+# per book: the GPU sits idle between launches while the CPU pays the launch and
+# tokenizer overhead. This batches every candidate word of a paragraph into a few
+# calls per word length (identical lengths need no padding). Words whose decision is
+# close to the model's thresholds are re-checked individually, so the produced text
+# is identical to the plain one-word-at-a-time result.
+_ACCENT_BATCH_STATS = {"batches": 0, "words": 0, "rechecks": 0}
+
+
+def install_batched_pipeline(accentizer) -> None:
+    if os.environ.get("DSR_PIPELINE_BATCH", "1") == "0":
+        return
+    model = getattr(accentizer, "accent_model", None)
+    session = getattr(model, "session", None)
+    tokenizer = getattr(model, "tokenizer", None)
+    id2label = getattr(model, "id2label", None)
+    if session is None or tokenizer is None or id2label is None:
+        return
+    try:
+        import numpy as _np
+        from ruaccent.text_preprocessor import TextPreprocessor as _TextPreprocessor
+        from ruaccent.accent_model import softmax as _softmax
+    except Exception:
+        return
+
+    original_internal = accentizer.process_all_internal
+    batch_size = max(1, int(os.environ.get("DSR_ACCENT_BATCH", "64")))
+    threshold = 0.55
+    borderline = 0.10
+    logits_index = {output.name: i for i, output in enumerate(session.get_outputs())}.get("logits", 0)
+
+    def _put_accent_batch(group_words):
+        results = [None] * len(group_words)
+        # Sorting by length keeps every chunk nearly uniform, so a single padded run
+        # per chunk wastes almost nothing while cutting the number of ONNX launches
+        # (the main reason the GPU stayed idle on thousands of one-word calls).
+        order = sorted(range(len(group_words)), key=lambda i: len(group_words[i]))
+        for start in range(0, len(order), batch_size):
+            group = order[start:start + batch_size]
+            words_in_group = [group_words[i] for i in group]
+            lowers = [w.lower() for w in words_in_group]
+            encoded = tokenizer(lowers, return_tensors="np", padding=True)
+            inputs = {k: v.astype(_np.int64) for k, v in encoded.items()}
+            logits = session.run(None, inputs)[logits_index]
+            probabilities = _softmax(logits)
+            _ACCENT_BATCH_STATS["batches"] += 1
+            _ACCENT_BATCH_STATS["words"] += len(group)
+            for offset, index in enumerate(group):
+                length = len(lowers[offset]) + 2
+                token_probs = probabilities[offset, :length, :]
+                token_logits = logits[offset, :length, :]
+                scores = _np.max(token_probs, axis=-1)
+                labels = _np.argmax(token_logits, axis=-1)
+                part = _np.partition(token_probs, -2, axis=-1)
+                margins = part[:, -1] - part[:, -2]
+                if bool(_np.min(_np.abs(scores - threshold)) < borderline) or bool(_np.min(margins) < borderline):
+                    _ACCENT_BATCH_STATS["rechecks"] += 1
+                    results[index] = model.put_accent(words_in_group[offset])
+                    continue
+                pred = [{"label": id2label[str(int(l))], "score": float(s)} for l, s in zip(labels, scores)]
+                results[index] = model.render_stress(words_in_group[offset], pred)
+        return results
+
+    def batched_process_all_internal(text):
+        text = re.sub(accentizer.normalize, "", text)
+        sentences = _TextPreprocessor.split_by_sentences(text)
+        pieces = []
+        jobs = []
+        for sentence in sentences:
+            sentence_words, remaining_text = _TextPreprocessor.split_by_words(sentence)
+            if len(sentence_words) == 0:
+                pieces.append(("".join(remaining_text), None))
+                continue
+            if getattr(accentizer, "tiny_mode", False):
+                stress_usages = ["STRESS"] * len(text)
+            else:
+                stress_usages = accentizer.extract_entities(accentizer.stress_usage_predictor.predict_stress_usage(sentence))
+            processed_words = accentizer._process_yo(sentence_words, sentence)
+            processed_words = accentizer._process_omographs(processed_words)
+            for i, word in enumerate(processed_words):
+                if "+" in word:
+                    continue
+                if stress_usages[i] != "STRESS":
+                    continue
+                lower_word = word.lower()
+                stressed_word = accentizer.accents.get(lower_word, lower_word)
+                if stressed_word == lower_word and not accentizer.has_punctuation(lower_word) and accentizer.count_vowels(lower_word) > 1:
+                    jobs.append((processed_words, i, word))
+                else:
+                    match = re.finditer(r"\+", stressed_word)
+                    word_fixed = list(word)
+                    for j, e in enumerate(list(match)):
+                        word_fixed = word_fixed[:e.start() + j] + ["+"] + list(word)[e.end() - 1:]
+                    processed_words[i] = "".join(word_fixed)
+            pieces.append((remaining_text, processed_words))
+        pending_words = []
+        pending_jobs = []
+        for job in jobs:
+            container, index, word = job
+            cached = _ACCENT_CACHE.get(word)
+            if cached is not None:
+                _ACCENT_CACHE_HITS[0] += 1
+                container[index] = cached
+            else:
+                pending_words.append(word)
+                pending_jobs.append(job)
+        if pending_words:
+            produced = _put_accent_batch(pending_words)
+            for word, produced_word, job in zip(pending_words, produced, pending_jobs):
+                container, index, _ = job
+                container[index] = produced_word
+                _ACCENT_CACHE[word] = produced_word
+        assembled = []
+        for remaining_text, processed_words in pieces:
+            if processed_words is None:
+                assembled.append(remaining_text)
+                continue
+            processed_sentence = "".join([l + r for l, r in zip(remaining_text, processed_words)] + [remaining_text[-1]])
+            assembled.append(accentizer.delete_spaces_before_punc(processed_sentence))
+        return "".join(assembled)
+
+    def safe_process_all_internal(text):
+        try:
+            return batched_process_all_internal(text)
+        except Exception:
+            return original_internal(text)
+
+    accentizer.process_all_internal = safe_process_all_internal
+
+
 def words(text: str) -> list[str]:
     return [ACCENT_RE.sub("", match.group()).casefold().replace("ё", "е") for match in WORD_RE.finditer(text)]
 
@@ -232,7 +405,7 @@ def safe_process(accentizer, text: str) -> str:
     result = accentizer.process_all(text)
     if words(result) == words(text) and dialogue_initial_words_preserved(text, result):
         return _remove_stress_from_unstressed(result)
-    print("WARNING: RUAccent altered a dialogue prefix; retrying line by line.", file=sys.stderr, flush=True)
+    _emit("WARNING: RUAccent altered a dialogue prefix; retrying line by line.")
     pieces = re.split(r"(\r?\n)", text)
     recovered_lines = []
     for piece in pieces:
@@ -306,6 +479,25 @@ def process_line(accentizer, text: str) -> str:
     return recovered_text
 
 
+def process_payload(accentizer, executor, payload):
+    """Accent one text node or a batch of them; returns one result dict or a list."""
+    if isinstance(payload, list):
+        return list(executor.map(lambda item: process_item(accentizer, item), payload))
+    return process_item(accentizer, payload)
+
+
+def process_item(accentizer, item):
+    try:
+        if not isinstance(item, str):
+            raise ValueError("Ожидалась JSON-строка.")
+        inference_started = time.perf_counter()
+        result = safe_process(accentizer, item)
+        _emit(f"DSR_INFERENCE:{time.perf_counter() - inference_started:.6f}")
+        return {"text": result}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default="turbo3.1")
@@ -349,6 +541,8 @@ def main() -> int:
         )
         configure_onnx_tokenizer_inputs(accentizer)
         configure_onnx_performance(accentizer)
+        install_accent_cache(accentizer)
+        install_batched_pipeline(accentizer)
         if args.device == "CUDA":
             model_names = ("omograph_model", "accent_model", "stress_usage_predictor", "yo_homograph_model")
             active = []
@@ -369,23 +563,31 @@ def main() -> int:
             print("Проверено: все ONNX-модели RUAccent используют CUDAExecutionProvider.", file=sys.stderr, flush=True)
         model_bytes = sum(item.stat().st_size for item in model_path.rglob("*") if item.is_file()) if model_path.is_dir() else 0
         print(f"DSR_PROGRESS:Модель {args.model} загружена; размер файлов модели: {model_bytes / 1024 / 1024:.1f} МБ ({args.device}).", file=sys.stderr, flush=True)
+        _emit(f"DSR_PERF:pipeline:workers={_PIPELINE_WORKERS}")
         print("READY", flush=True)
     except Exception as exc:
         print("ERROR: " + str(exc), flush=True)
         traceback.print_exc(file=sys.stderr)
         return 1
-    for line in sys.stdin:
-        try:
-            text = json.loads(line)
-            if not isinstance(text, str):
-                raise ValueError("Ожидалась JSON-строка.")
-            inference_started = time.perf_counter()
-            result = safe_process(accentizer, text)
-            inference_seconds = time.perf_counter() - inference_started
-            print(f"DSR_INFERENCE:{inference_seconds:.6f}", file=sys.stderr, flush=True)
-            print(json.dumps({"text": result}, ensure_ascii=False), flush=True)
-        except Exception as exc:
-            print(json.dumps({"error": str(exc)}, ensure_ascii=False), flush=True)
+    executor = ThreadPoolExecutor(max_workers=_PIPELINE_WORKERS)
+    try:
+        for line in sys.stdin:
+            try:
+                payload = json.loads(line)
+            except Exception as exc:
+                print(json.dumps({"error": str(exc)}, ensure_ascii=False), flush=True)
+                continue
+            response = process_payload(accentizer, executor, payload)
+            print(json.dumps(response, ensure_ascii=False), flush=True)
+    finally:
+        executor.shutdown(wait=False)
+    if _ACCENT_CACHE_ENABLED:
+        _emit(f"DSR_PERF:accent_cache:entries={len(_ACCENT_CACHE)}:hits={_ACCENT_CACHE_HITS[0]}")
+    _emit(
+        "DSR_PERF:accent_batch:batches={0}:words={1}:rechecks={2}".format(
+            _ACCENT_BATCH_STATS["batches"], _ACCENT_BATCH_STATS["words"], _ACCENT_BATCH_STATS["rechecks"]
+        )
+    )
 
     return 0
 if __name__ == "__main__":

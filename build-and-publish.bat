@@ -8,7 +8,7 @@ echo.
 set "PROJECT=%~dp0FB2AccentConverter.csproj"
 set "PUBLISH_DIR=%~dp0publish"
 set "MAINWINDOW_SOURCE=%~dp0MainWindow.cs"
-set "REVIEW_SOURCE=%~dp0WordReviewWindow.cs"
+set "REVIEW_SOURCE=%~dp0WordReviewWindow.xaml.cs"
 
 if not exist "%~dp0dictionary\*.txt" (
     echo ERROR: dictionary text file is missing in "%~dp0dictionary".
@@ -38,6 +38,11 @@ if not defined DEEPREADER_PROJECT (
 if not exist "%DEEPREADER_PROJECT%" (
     echo ERROR: expected DeepReader project not found: "%DEEPREADER_PROJECT%"
     set "RESULT=3"
+    goto :finish
+)
+if not exist "%REVIEW_SOURCE%" (
+    echo ERROR: review-window source is missing: "%REVIEW_SOURCE%"
+    set "RESULT=6"
     goto :finish
 )
 findstr /C:"DeclensionCorrection" "%REVIEW_SOURCE%" >nul

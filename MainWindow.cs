@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Net.NetworkInformation;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
@@ -39,13 +40,21 @@ public sealed partial class MainWindow : Window
     private TextBlock _cpuLabel => CpuLabel;
     private TextBlock _memoryLabel => MemoryLabel;
     private TextBlock _gpuLabel => GpuLabel;
+    private ProgressBar _networkUsage => NetworkUsageBar;
+    private TextBlock _networkLabel => NetworkLabel;
     private readonly DispatcherTimer _resourceTimer = new() { Interval = TimeSpan.FromSeconds(1) };
-    private long _previousIdle;
-    private long _previousKernel;
-    private long _previousUser;
     private bool _hasCpuSample;
     private bool _resourceSampleRunning;
+    private DateTime _previousNetworkSampleTime;
+    private long _previousNetworkBytes;
+    private bool _hasNetworkSample;
+    private DateTime _previousCpuSampleTime;
+    private double _previousProcessCpuMs;
+    private DateTime _activityStartedAt = DateTime.MinValue;
+    private string _activityStage = "Ожидание";
+    private bool _activityWasDownloading;
     private string? _loadedFile;
+    private bool _busy;
 
     public MainWindow()
     {
@@ -58,15 +67,14 @@ public sealed partial class MainWindow : Window
         BrowseInputButton.Click += (_, _) => SelectInput();
         BrowseOutputButton.Click += (_, _) => SelectOutput();
         _clearCacheButton.Click += (_, _) => ClearCache();
-        if (!CanWriteToApplicationDirectory())
-        {
-            _clearCacheButton.IsEnabled = false;
-            _prepareButton.IsEnabled = false;
-            _convert.IsEnabled = false;
-            _status.Text = "Папка приложения недоступна для записи. Переместите DSR.exe в папку с правами записи (например, не в Program Files).";
-        }
+        var canWrite = CanWriteToApplicationDirectory();
+        _clearCacheButton.IsEnabled = canWrite;
+        _prepareButton.IsEnabled = canWrite;
+        _convert.IsEnabled = canWrite;
         UpdateSelectedModelStatus();
-        _status.Text = "Нажмите «Подготовка к работе»: DSR настроит Python, загрузит и проверит модели.";
+        _status.Text = canWrite
+            ? "Нажмите «Подготовка к работе»: DSR настроит Python, загрузит и проверит модели."
+            : "Папка приложения недоступна для записи. Переместите DSR.exe в папку с правами записи (например, не в Program Files).";
         _convert.Click += async (_, _) => await ConvertAsync();
         _pauseConversion.Click += (_, _) => ToggleConversionPause();
         _stopConversion.Click += (_, _) => StopConversion();
@@ -77,7 +85,13 @@ public sealed partial class MainWindow : Window
         _resourceTimer.Tick += async (_, _) => await UpdateResourceUsageAsync();
         _resourceTimer.Start();
         Closed += (_, _) => _resourceTimer.Stop();
-        _resourceTimer.Tick += (_, _) => UpdateResourceSizeStatus();
+        var lastSizeUpdate = DateTime.MinValue;
+        _resourceTimer.Tick += (_, _) =>
+        {
+            if (DateTime.UtcNow - lastSizeUpdate < TimeSpan.FromSeconds(30)) return;
+            lastSizeUpdate = DateTime.UtcNow;
+            _ = UpdateResourceSizeStatusAsync();
+        };
         _ = UpdateResourceUsageAsync();
     }
 
@@ -95,30 +109,28 @@ public sealed partial class MainWindow : Window
         _modelStatus.Text = bytes > 0
             ? $"Выбрана модель омографов: {model}; её файлы (ONNX и токенизатор) занимают {bytes / 1024.0 / 1024:0.0} МБ."
             : $"Выбрана модель омографов: {model}; файлы появятся при загрузке.";
-        UpdateResourceSizeStatus();
+        _ = UpdateResourceSizeStatusAsync();
     }
 
-    private void UpdateResourceSizeStatus()
+    private async Task UpdateResourceSizeStatusAsync()
     {
-        try
+        var text = await Task.Run(() =>
         {
-            var root = Program.DataDirectory;
-            if (!Directory.Exists(root))
+            try
             {
-                _resourceSizeStatus.Text = $"Ресурсы будут размещены: {root}";
-                return;
+                var root = Program.DataDirectory;
+                if (!Directory.Exists(root)) return $"Ресурсы будут размещены: {root}";
+                var areas = new[] { ("Python", Path.Combine(root, "python")),
+                    ("Модели и кэш", Path.Combine(root, "модели")), ("Кэш загрузок", Path.Combine(root, "кэш")) };
+                var totals = areas.Select(area => (area.Item1, Size: Directory.Exists(area.Item2)
+                    ? Directory.EnumerateFiles(area.Item2, "*", SearchOption.AllDirectories).Sum(file => new FileInfo(file).Length)
+                    : 0L)).ToArray();
+                return $"Ресурсы: {root} · всего {FormatSize(totals.Sum(item => item.Size))}\n"
+                    + string.Join(" · ", totals.Select(item => $"{item.Item1}: {FormatSize(item.Size)}"));
             }
-            var areas = new[] { ("Python", Path.Combine(root, "python")), ("Модели и кэш", Path.Combine(root, "модели")), ("Кэш загрузок", Path.Combine(root, "кэш")), ("Временные файлы", Path.Combine(root, "временные-файлы")) };
-            var totals = areas.Select(area => (area.Item1, Size: Directory.Exists(area.Item2)
-                ? Directory.EnumerateFiles(area.Item2, "*", SearchOption.AllDirectories).Sum(file => new FileInfo(file).Length)
-                : 0L)).ToArray();
-            var total = totals.Sum(item => item.Size);
-            _resourceSizeStatus.Text = $"Ресурсы: {root} · всего {FormatSize(total)}\n" + string.Join(" · ", totals.Select(item => $"{item.Item1}: {FormatSize(item.Size)}"));
-        }
-        catch (Exception ex)
-        {
-            _resourceSizeStatus.Text = $"Папка ресурсов: {Program.DataDirectory} (не удалось посчитать размер: {ex.Message})";
-        }
+            catch (Exception ex) { return $"Не удалось посчитать размер ресурсов: {ex.Message}"; }
+        });
+        if (IsLoaded) _resourceSizeStatus.Text = text;
     }
 
     private static string FormatSize(long bytes)
@@ -137,45 +149,112 @@ public sealed partial class MainWindow : Window
         try
         {
             var sample = await Task.Run(ReadResourceUsage);
-            var idleDelta = sample.Idle - _previousIdle;
-            var kernelDelta = sample.Kernel - _previousKernel;
-            var userDelta = sample.User - _previousUser;
-            if (_hasCpuSample && kernelDelta + userDelta > 0)
+            // Дерево процессов: окно DSR почти не тратит CPU — всю работу выполняет
+            // дочерний python.exe (воркер), поэтому без него индикатор показывал ~0%.
+            var (processCpu, processWorkingSet) = Program.CurrentProcessTreeUsage();
+            try
             {
-                var cpu = Math.Clamp(100.0 * (kernelDelta + userDelta - idleDelta) / (kernelDelta + userDelta), 0, 100);
-                _cpuUsage.Value = cpu;
-                _cpuLabel.Text = $"CPU: {cpu:0}%";
+                var nowCpu = DateTime.UtcNow;
+                if (_hasCpuSample)
+                {
+                    var elapsedMilliseconds = Math.Max(1, (nowCpu - _previousCpuSampleTime).TotalMilliseconds);
+                    var cpuPercent = Math.Clamp((processCpu - _previousProcessCpuMs) / elapsedMilliseconds * 100.0 / Math.Max(1, Environment.ProcessorCount), 0, 100);
+                    _cpuUsage.Value = cpuPercent;
+                    _cpuLabel.Text = $"CPU программы: {cpuPercent:0}%";
+                }
+                _previousProcessCpuMs = processCpu;
+                _previousCpuSampleTime = nowCpu;
+                _hasCpuSample = true;
             }
-            _previousIdle = sample.Idle;
-            _previousKernel = sample.Kernel;
-            _previousUser = sample.User;
-            _hasCpuSample = true;
-            _memoryUsage.Value = sample.MemoryPercent;
-            _memoryLabel.Text = $"ОЗУ: {sample.MemoryPercent:0}% ({sample.MemoryUsedGb:0.0}/{sample.MemoryTotalGb:0.0} ГБ)";
+            catch (InvalidOperationException) { }
+            var processMemoryMb = processWorkingSet / 1024.0 / 1024;
+            var processMemoryPercent = sample.MemoryTotalGb > 0 ? processMemoryMb / 1024 / sample.MemoryTotalGb * 100 : 0;
+            _memoryUsage.Value = Math.Clamp(processMemoryPercent, 0, 100);
+            _memoryLabel.Text = $"ОЗУ программы: {processMemoryMb:0} МБ ({processMemoryPercent:0.0}% общей)";
             _gpuUsage.Value = sample.GpuHasUtilization ? sample.GpuPercent : sample.GpuMemoryPercent;
             _gpuLabel.Text = sample.GpuAvailable
-                ? $"GPU: {(sample.GpuHasUtilization ? $"{sample.GpuPercent:0}%" : "нагрузка н/д")} · VRAM {sample.GpuMemoryUsedMb:N0}/{sample.GpuMemoryTotalMb:N0} МБ"
+                ? $"GPU: {(sample.GpuHasUtilization ? $"{sample.GpuPercent:0}% (всего на карте)" : "нагрузка н/д")} · VRAM {sample.GpuMemoryUsedMb:N0}/{sample.GpuMemoryTotalMb:N0} МБ"
                 : "GPU: NVIDIA недоступна";
+            var now = DateTime.UtcNow;
+            var elapsed = _hasNetworkSample ? (now - _previousNetworkSampleTime).TotalSeconds : 0;
+            var receiveRate = elapsed > 0 ? (sample.NetworkBytes - _previousNetworkBytes) / elapsed : 0;
+            receiveRate = Math.Max(0, receiveRate);
+            _networkUsage.Value = Math.Clamp(receiveRate / (1024 * 1024) * 10, 0, 100);
+            _networkLabel.Text = receiveRate > 1024
+                ? $"Сеть: ↓ {FormatSize((long)receiveRate)}/с"
+                : "Сеть: ожидание";
+            _previousNetworkBytes = sample.NetworkBytes;
+            _previousNetworkSampleTime = now;
+            _hasNetworkSample = true;
+            UpdateActivityElapsed();
         }
         catch (Exception)
         {
             _gpuLabel.Text = "GPU: данные недоступны";
+            _cpuLabel.Text = "CPU программы: данные недоступны";
+            _memoryLabel.Text = "ОЗУ программы: данные недоступны";
+            _networkLabel.Text = "Сеть: данные недоступны";
         }
         finally { _resourceSampleRunning = false; }
     }
 
     private static ResourceUsage ReadResourceUsage()
     {
-        if (!GetSystemTimes(out var idle, out var kernel, out var user))
-            throw new InvalidOperationException("Не удалось получить загрузку CPU.");
         var memory = new MemoryStatus { Length = (uint)Marshal.SizeOf<MemoryStatus>() };
         if (!GlobalMemoryStatusEx(ref memory))
             throw new InvalidOperationException("Не удалось получить использование ОЗУ.");
-        var gpuPercent = 0.0;
-        var gpuMemoryUsed = 0.0;
-        var gpuMemoryTotal = 0.0;
-        var gpuHasUtilization = false;
-        var gpuAvailable = false;
+        var gpu = ReadGpuSample();
+
+        var totalMemory = memory.TotalPhysical;
+        var usedMemory = totalMemory - memory.AvailablePhysical;
+        long networkBytes;
+        try
+        {
+            networkBytes = NetworkInterface.GetAllNetworkInterfaces()
+                .Where(adapter => adapter.OperationalStatus == OperationalStatus.Up && adapter.NetworkInterfaceType != NetworkInterfaceType.Loopback)
+                .Select(adapter =>
+                {
+                    try
+                    {
+                        var stats = adapter.GetIPv4Statistics();
+                        return stats.BytesReceived + stats.BytesSent;
+                    }
+                    catch (NetworkInformationException) { return 0L; }
+                    catch (InvalidOperationException) { return 0L; }
+                })
+                .Sum();
+        }
+        catch (NetworkInformationException) { networkBytes = 0; }
+        return new ResourceUsage(totalMemory == 0 ? 0 : usedMemory * 100.0 / totalMemory,
+            usedMemory / 1024.0 / 1024 / 1024, totalMemory / 1024.0 / 1024 / 1024,
+            gpu.Available ? Math.Clamp(gpu.Percent, 0, 100) : 0, gpu.MemoryUsedMb, gpu.MemoryTotalMb,
+            gpu.MemoryTotalMb > 0 ? Math.Clamp(gpu.MemoryUsedMb * 100.0 / gpu.MemoryTotalMb, 0, 100) : 0,
+            gpu.HasUtilization, gpu.Available, networkBytes);
+    }
+
+    private readonly record struct GpuSample(bool Available, bool HasUtilization, double Percent, double MemoryUsedMb, double MemoryTotalMb);
+
+    private static readonly TimeSpan GpuSampleInterval = TimeSpan.FromSeconds(5);
+    private static readonly object GpuSampleLock = new();
+    private static DateTime _gpuSampledAt = DateTime.MinValue;
+    private static GpuSample _gpuSample = new(false, false, 0, 0, 0);
+
+    // Spawning nvidia-smi is comparatively expensive, so its reading is cached: the
+    // one-second UI timer refreshes CPU/RAM/network on every tick but reuses the last
+    // GPU value until GpuSampleInterval elapses.
+    private static GpuSample ReadGpuSample()
+    {
+        lock (GpuSampleLock)
+        {
+            if (DateTime.UtcNow - _gpuSampledAt < GpuSampleInterval) return _gpuSample;
+            _gpuSample = QueryGpuSample();
+            _gpuSampledAt = DateTime.UtcNow;
+            return _gpuSample;
+        }
+    }
+
+    private static GpuSample QueryGpuSample()
+    {
         try
         {
             var start = new ProcessStartInfo("nvidia-smi")
@@ -196,33 +275,19 @@ public sealed partial class MainWindow : Window
                     var values = outputTask.GetAwaiter().GetResult().Split(',', StringSplitOptions.TrimEntries);
                     if (process.ExitCode == 0 && values.Length >= 3)
                     {
-                        gpuHasUtilization = double.TryParse(values[0], NumberStyles.Float, CultureInfo.InvariantCulture, out gpuPercent);
-                        var hasMemoryUsed = double.TryParse(values[1], NumberStyles.Float, CultureInfo.InvariantCulture, out gpuMemoryUsed);
-                        var hasMemoryTotal = double.TryParse(values[2], NumberStyles.Float, CultureInfo.InvariantCulture, out gpuMemoryTotal);
-                        gpuAvailable = gpuHasUtilization || (hasMemoryUsed && hasMemoryTotal && gpuMemoryTotal > 0);
+                        var hasUtilization = double.TryParse(values[0], NumberStyles.Float, CultureInfo.InvariantCulture, out var percent);
+                        var hasMemoryUsed = double.TryParse(values[1], NumberStyles.Float, CultureInfo.InvariantCulture, out var memoryUsed);
+                        var hasMemoryTotal = double.TryParse(values[2], NumberStyles.Float, CultureInfo.InvariantCulture, out var memoryTotal);
+                        var available = hasUtilization || (hasMemoryUsed && hasMemoryTotal && memoryTotal > 0);
+                        return new GpuSample(available, hasUtilization, percent, memoryUsed, memoryTotal);
                     }
                 }
                 if (!process.HasExited) process.Kill(entireProcessTree: true);
             }
         }
         catch (Exception) { }
-
-        var totalMemory = memory.TotalPhysical;
-        var usedMemory = totalMemory - memory.AvailablePhysical;
-        return new ResourceUsage(FileTimeValue(idle), FileTimeValue(kernel), FileTimeValue(user),
-            totalMemory == 0 ? 0 : usedMemory * 100.0 / totalMemory,
-            usedMemory / 1024.0 / 1024 / 1024, totalMemory / 1024.0 / 1024 / 1024,
-            gpuAvailable ? Math.Clamp(gpuPercent, 0, 100) : 0, gpuMemoryUsed, gpuMemoryTotal,
-            gpuMemoryTotal > 0 ? Math.Clamp(gpuMemoryUsed * 100.0 / gpuMemoryTotal, 0, 100) : 0,
-            gpuHasUtilization, gpuAvailable);
+        return new GpuSample(false, false, 0, 0, 0);
     }
-
-    private static long FileTimeValue(System.Runtime.InteropServices.ComTypes.FILETIME value) =>
-        ((long)(uint)value.dwHighDateTime << 32) | (uint)value.dwLowDateTime;
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool GetSystemTimes(out System.Runtime.InteropServices.ComTypes.FILETIME idleTime,
-        out System.Runtime.InteropServices.ComTypes.FILETIME kernelTime, out System.Runtime.InteropServices.ComTypes.FILETIME userTime);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool GlobalMemoryStatusEx(ref MemoryStatus buffer);
@@ -241,9 +306,46 @@ public sealed partial class MainWindow : Window
         public ulong AvailableExtendedVirtual;
     }
 
-    private sealed record ResourceUsage(long Idle, long Kernel, long User, double MemoryPercent,
-        double MemoryUsedGb, double MemoryTotalGb, double GpuPercent, double GpuMemoryUsedMb,
-        double GpuMemoryTotalMb, double GpuMemoryPercent, bool GpuHasUtilization, bool GpuAvailable);
+    private sealed record ResourceUsage(double MemoryPercent, double MemoryUsedGb, double MemoryTotalGb,
+        double GpuPercent, double GpuMemoryUsedMb, double GpuMemoryTotalMb, double GpuMemoryPercent,
+        bool GpuHasUtilization, bool GpuAvailable, long NetworkBytes);
+
+    private void StartActivity(string stage)
+    {
+        _activityStartedAt = DateTime.UtcNow;
+        _activityStage = stage;
+        _activityWasDownloading = false;
+        ConversionStatsText.Text = $"Этап: {stage} · загрузка сети отслеживается выше";
+    }
+
+    private void SetActivityStage(string stage)
+    {
+        _activityStage = stage;
+        UpdateActivityElapsed();
+    }
+
+    private void SetActivityDownloading(bool downloading)
+    {
+        _activityWasDownloading = downloading;
+        UpdateActivityElapsed();
+    }
+
+    private void UpdateActivityElapsed()
+    {
+        if (_activityStartedAt == DateTime.MinValue) return;
+        var elapsed = FormatElapsed(DateTime.UtcNow - _activityStartedAt);
+        var downloadState = _activityWasDownloading ? " · скачивание/загрузка модели" : "";
+        ConversionStatsText.Text = $"Этап: {_activityStage}{downloadState} · идёт {elapsed}";
+    }
+
+    private void StopActivity(string result)
+    {
+        if (_activityStartedAt == DateTime.MinValue) return;
+        var elapsed = FormatElapsed(DateTime.UtcNow - _activityStartedAt);
+        ConversionStatsText.Text = $"Этап: {result} · заняло {elapsed}";
+        _activityStartedAt = DateTime.MinValue;
+        _activityWasDownloading = false;
+    }
 
     private void SelectInput()
     {
@@ -312,6 +414,14 @@ public sealed partial class MainWindow : Window
                         "Установить поддержку NVIDIA GPU?", MessageBoxButton.YesNo, MessageBoxImage.Question);
                     if (answer == MessageBoxResult.Yes)
                     {
+                        StartActivity("Установка CUDA Runtime");
+                        Program.SetupProgress = message => Dispatcher.Invoke(() =>
+                        {
+                            _gpuStatus.Text = message;
+                            SetActivityStage(message);
+                            SetActivityDownloading(message.Contains("Downloading", StringComparison.OrdinalIgnoreCase)
+                                || message.Contains("Retrying", StringComparison.OrdinalIgnoreCase));
+                        });
                         SetBusy(true);
                         try
                         {
@@ -332,7 +442,12 @@ public sealed partial class MainWindow : Window
                                 _gpuStatus.Foreground = Brushes.DarkOrange;
                             }
                         }
-                        finally { SetBusy(false); }
+                        finally
+                        {
+                            Program.SetupProgress = null;
+                            if (_activityStartedAt != DateTime.MinValue) StopActivity("Установка завершена");
+                            SetBusy(false);
+                        }
                     }
                     else
                     {
@@ -376,6 +491,7 @@ public sealed partial class MainWindow : Window
         var model = _model.SelectedItem?.ToString() ?? "turbo3.1";
         var device = _device.SelectedItem?.ToString() ?? "CPU";
         var includeImages = _illustrations.IsChecked == true;
+        StartActivity("Подготовка конвертации");
         SetBusy(true);
         _conversionControl = new Program.ConversionControl();
         _pauseConversion.IsEnabled = true;
@@ -409,37 +525,37 @@ public sealed partial class MainWindow : Window
                         _conversionStats.Text = message;
                         return;
                     }
-                    if (message.StartsWith("Загрузка модели ", StringComparison.Ordinal)
-                        || message.StartsWith("Подготовка модели ", StringComparison.Ordinal)
-                        || message.StartsWith("Модель ", StringComparison.Ordinal))
+                    var isModelLoading = message.StartsWith("Загрузка модели ", StringComparison.Ordinal);
+                    var isModelReady = message.StartsWith("Подготовка модели ", StringComparison.Ordinal)
+                        || message.StartsWith("Модель ", StringComparison.Ordinal);
+                    if (isModelLoading || isModelReady)
                     {
+                        SetActivityDownloading(isModelLoading);
                         _modelStatus.Text = message;
+                        SetActivityStage(message);
                         var percentStart = message.LastIndexOf(')');
                         var percentEnd = message.LastIndexOf('%');
-                        if (message.StartsWith("Загрузка модели ", StringComparison.Ordinal)
-                            && percentStart >= 0 && percentEnd > percentStart
+                        if (isModelLoading && percentStart >= 0 && percentEnd > percentStart
                             && double.TryParse(message.AsSpan(percentStart + 1, percentEnd - percentStart - 1), NumberStyles.Integer, CultureInfo.InvariantCulture, out var downloadedPercent))
                         {
                             _progress.IsIndeterminate = false;
                             _progress.Value = Math.Clamp(downloadedPercent, 0, 100);
                         }
-                        else if (message.StartsWith("Модель ", StringComparison.Ordinal) && message.Contains("загружена", StringComparison.Ordinal))
+                        else if (isModelReady && message.Contains("загружена", StringComparison.Ordinal))
                         {
                             _progress.IsIndeterminate = false;
                             _progress.Value = 100;
                         }
                     }
                     else
+                    {
                         _status.Text = message;
-                    if (message.StartsWith("Модель ", StringComparison.Ordinal) && message.Contains("загружена", StringComparison.Ordinal))
-                    {
-                        _progress.IsIndeterminate = false;
-                        _progress.Value = 100;
-                    }
-                    else if (message.StartsWith("Готово:", StringComparison.Ordinal))
-                    {
-                        _progress.IsIndeterminate = false;
-                        _progress.Value = 100;
+                        SetActivityStage(message);
+                        if (message.StartsWith("Готово:", StringComparison.Ordinal))
+                        {
+                            _progress.IsIndeterminate = false;
+                            _progress.Value = 100;
+                        }
                     }
                 }),
                 (completed, total) => Dispatcher.Invoke(() =>
@@ -454,6 +570,7 @@ public sealed partial class MainWindow : Window
             conversionWatch.Stop();
             _conversionStats.Text = $"Файл: {sourceBytes / 1024d / 1024d:0.00} МБ · около {sourceCharacters:N0} символов · обработано {totalUnits:N0} фрагментов за {FormatElapsed(conversionWatch.Elapsed)} · отчёт слов рядом с исходником";
             _status.Text = "Конвертация завершена: " + output;
+            StopActivity("Конвертация завершена");
             UpdateReviewButton();
             var outputExtension = Path.GetExtension(output);
             if ((outputExtension.Equals(".fb2", StringComparison.OrdinalIgnoreCase) || outputExtension.Equals(".txt", StringComparison.OrdinalIgnoreCase)) && _reviewWords.IsEnabled)
@@ -462,23 +579,26 @@ public sealed partial class MainWindow : Window
                 new WordReviewWindow(reviewPath, output) { Owner = this }.ShowDialog();
                 UpdateReviewButton();
             }
-            UpdateResourceSizeStatus();
+            _ = UpdateResourceSizeStatusAsync();
             if (MessageBox.Show(this, "Книга готова. Открыть папку с результатом?", "Готово", MessageBoxButton.YesNo, MessageBoxImage.Information) == MessageBoxResult.Yes)
                 System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", $"/select,\"{output}\"") { UseShellExecute = true });
         }
         catch (OperationCanceledException)
         {
             conversionWatch.Stop();
+            StopActivity("Обработка остановлена");
             _status.Text = "Обработка остановлена. Отчёт диагностики сохранён рядом с выходным файлом.";
             _conversionStats.Text = $"Остановлено через {FormatElapsed(conversionWatch.Elapsed)} · отчёт: {_diagnosticsPath}";
         }
         catch (Exception ex)
         {
+            StopActivity("Ошибка конвертации");
             Program.LogError($"Ошибка конвертации файла: {input} -> {output}", ex);
             _status.Text = "Ошибка: " + ex.GetBaseException().Message + $"\nПодробности: {Program.LogFilePath}\nОтчёт: {_diagnosticsPath}";
         }
         finally
         {
+            if (_activityStartedAt != DateTime.MinValue) StopActivity("Обработка завершена");
             _conversionControl = null;
             _pauseConversion.IsEnabled = false;
             _stopConversion.IsEnabled = false;
@@ -538,17 +658,40 @@ public sealed partial class MainWindow : Window
             MessageBox.Show(this, "Приложение готово к работе.\n\nДоступно: обработка FB2 с сохранением структуры и изображений, обработка TXT с сохранением строк, настройка CPU/CUDA.", "DSR готов", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
+        StartActivity("Подготовка Python и моделей");
         SetBusy(true);
+        var selectedDevice = _device.SelectedItem?.ToString() ?? "CPU";
+        var selectedModel = _model.SelectedItem?.ToString() ?? "turbo3.1";
         _status.Text = "Настраиваю Python и зависимости, загружаю выбранную модель, выполняю тест обработки…";
         try
         {
-            var selectedDevice = _device.SelectedItem?.ToString() ?? "CPU";
-            var selectedModel = _model.SelectedItem?.ToString() ?? "turbo3.1";
-            await Task.Run(() => Program.PrepareInteractive(selectedModel, selectedDevice,
-                message => Dispatcher.Invoke(() => _status.Text = message)));
-            _prepared = true;
-            UpdateResourceSizeStatus();
-            var gpu = await Task.Run(Program.ProbeGpu);
+            Program.SetupProgress = message => Dispatcher.Invoke(() =>
+            {
+                _status.Text = message;
+                SetActivityStage(message);
+                SetActivityDownloading(message.Contains("Downloading", StringComparison.OrdinalIgnoreCase)
+                    || message.Contains("Retrying", StringComparison.OrdinalIgnoreCase)
+                    || message.Contains("Загрузка", StringComparison.OrdinalIgnoreCase));
+            });
+            try
+            {
+                await Task.Run(() => Program.PrepareInteractive(selectedModel, selectedDevice,
+                    message => Dispatcher.Invoke(() =>
+                    {
+                        _status.Text = message;
+                        SetActivityStage(message);
+                        SetActivityDownloading(message.Contains("скач", StringComparison.OrdinalIgnoreCase)
+                            || message.Contains("загружа", StringComparison.OrdinalIgnoreCase));
+                    })));
+            }
+            finally { Program.SetupProgress = null; }
+            _ = UpdateResourceSizeStatusAsync();
+            Program.GpuProbeResult gpu;
+            try { gpu = await Task.Run(Program.ProbeGpu); }
+            catch (Exception ex)
+            {
+                gpu = new Program.GpuProbeResult(false, "Проверка GPU недоступна: " + ex.GetBaseException().Message);
+            }
             if (gpu.Supported)
             {
                 if (!_device.Items.Contains("CUDA")) _device.Items.Add("CUDA");
@@ -562,12 +705,15 @@ public sealed partial class MainWindow : Window
                 _gpuStatus.Text = gpu.Message + " Будет использован CPU.";
                 _gpuStatus.Foreground = Brushes.DarkOrange;
             }
+            _prepared = true;
             _status.Text = "Приложение готово к работе.";
             UpdateSelectedModelStatus();
             MessageBox.Show(this, "Приложение готово к работе.\n\nДоступно:\n• FB2 → FB2 с сохранением структуры и иллюстраций;\n• TXT → TXT с сохранением строк и форматирования текста;\n• CPU или доступная CUDA-видеокарта;\n• исходный файл не изменяется.", "DSR готов", MessageBoxButton.OK, MessageBoxImage.Information);
         }
         catch (Exception ex)
         {
+            if (Program.SetupProgress != null) Program.SetupProgress = null;
+            StopActivity("Ошибка подготовки");
             _prepared = false;
             var details = $"Модель: {_model.SelectedItem}; устройство: {_device.SelectedItem}; Python: {Path.Combine(Program.DataDirectory, "python", "Scripts", "python.exe")}";
             Program.LogError("Подготовка к работе не завершена", new InvalidOperationException(details, ex));
@@ -576,6 +722,7 @@ public sealed partial class MainWindow : Window
         }
         finally
         {
+            if (_activityStartedAt != DateTime.MinValue) StopActivity("Подготовка завершена");
             SetBusy(false);
             if (!CanWriteToApplicationDirectory())
             {
@@ -595,10 +742,14 @@ public sealed partial class MainWindow : Window
 
     private void SetBusy(bool busy)
     {
-        _prepareButton.IsEnabled = !busy;
-        _convert.IsEnabled = !busy;
-        _clearCacheButton.IsEnabled = !busy;
+        _busy = busy;
+        var canWrite = CanWriteToApplicationDirectory();
+        _prepareButton.IsEnabled = !busy && canWrite;
+        _convert.IsEnabled = !busy && canWrite;
+        _clearCacheButton.IsEnabled = !busy && canWrite;
         _gpuTest.IsEnabled = !busy;
+        BrowseInputButton.IsEnabled = !busy;
+        BrowseOutputButton.IsEnabled = !busy;
         _status.Opacity = busy ? 0.8 : 1;
         _progress.Visibility = busy ? Visibility.Visible : Visibility.Collapsed;
         _progress.IsIndeterminate = busy;
@@ -626,7 +777,7 @@ public sealed partial class MainWindow : Window
             _clearCacheButton.IsEnabled = CanWriteToApplicationDirectory();
             _prepareButton.IsEnabled = _clearCacheButton.IsEnabled;
             _convert.IsEnabled = _clearCacheButton.IsEnabled;
-            UpdateResourceSizeStatus();
+            _ = UpdateResourceSizeStatusAsync();
             _status.Text = "Ресурсы удалены. Нажмите «Подготовка к работе», чтобы снова установить компоненты и модели.";
         }
         catch (Exception ex)

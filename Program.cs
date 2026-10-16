@@ -1,5 +1,7 @@
-﻿using System.Diagnostics;
+﻿using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Linq;
 using System.Reflection;
 using System.Text;
@@ -27,13 +29,15 @@ internal static class Program
     // worker leaves a stray combining acute mark, these rules guarantee that:
     //  • a combining accent never stays adjacent to the letter ё (ё is always stressed);
     //  • a short function word (preposition/conjunction/particle) never carries stress.
+    // Keep this list identical to _UNSTRESSED_WORDS in ruaccent_worker.py: the two
+    // layers must agree, otherwise one of them silently stops protecting a word.
     private static readonly HashSet<string> UnstressedWords = new(StringComparer.OrdinalIgnoreCase)
     {
         // Prepositions
         "о", "об", "обо", "в", "во", "с", "со", "к", "ко", "у", "от", "до", "из",
         "без", "для", "про", "над", "под", "при", "на", "за",
         // Conjunctions and particles
-        "и", "а", "но", "да", "ли", "бы", "же", "ль",
+        "и", "а", "но", "да", "ли", "бы", "же", "ль", "то",
     };
     // Подробный журнал правок: помогает разобрать, почему конкретная книга не применилась.
     internal static string ReviewLogPath => Path.Combine(DataDirectory, "DSR-правила.log");
@@ -63,9 +67,108 @@ internal static class Program
     internal static string TrainingLogPath => Path.Combine(DataDirectory, "накопленные-примеры.jsonl");
     internal static string CorrectionsFor(string reviewPath) => Path.Combine(Path.GetDirectoryName(Path.GetFullPath(reviewPath))!, Path.GetFileNameWithoutExtension(reviewPath).Replace("_проверка-слов", "_исправления") + ".txt");
     internal static string ReviewPathFor(string inputPath) => Path.Combine(Path.GetDirectoryName(Path.GetFullPath(inputPath))!, Path.GetFileNameWithoutExtension(inputPath) + "_проверка-слов.txt");
-    private static readonly Lazy<Dictionary<string, string>> UserDictionary = new(LoadUserDictionary);
+    // ConcurrentDictionary: the user dictionary is read on the background conversion
+    // thread and written from the UI thread when corrections are saved, so a plain
+    // Dictionary could be corrupted by a concurrent read and write.
+    private static readonly Lazy<ConcurrentDictionary<string, string>> UserDictionary = new(LoadUserDictionary);
     private static readonly Lazy<Dictionary<string, string>> YoDictionary = new(LoadYoDictionary);
     internal static string FormCorrectionsPathFor(string reviewPath) => Path.Combine(Path.GetDirectoryName(Path.GetFullPath(reviewPath))!, Path.GetFileNameWithoutExtension(reviewPath).Replace("_проверка-слов", "_формы") + ".json");
+
+    // The actual accenting runs in the child python.exe worker; the window process
+    // itself mostly waits on it and uses almost no CPU. The load indicators therefore
+    // sum the CPU and memory of the whole process tree (the window plus every child,
+    // including the Python worker), otherwise they would show the near-idle window as 0%.
+    private const uint Th32CsSnapProcess = 0x00000002;
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct ProcessEntry32
+    {
+        public uint dwSize;
+        public uint cntUsage;
+        public uint th32ProcessID;
+        public IntPtr th32DefaultHeapID;
+        public uint th32ModuleID;
+        public uint cntThreads;
+        public uint th32ParentProcessID;
+        public int pcPriClassBase;
+        public uint dwFlags;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+        public string szExeFile;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr CreateToolhelp32Snapshot(uint dwFlags, uint th32ProcessID);
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode, EntryPoint = "Process32FirstW")]
+    private static extern bool Process32First(IntPtr snapshot, ref ProcessEntry32 entry);
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode, EntryPoint = "Process32NextW")]
+    private static extern bool Process32Next(IntPtr snapshot, ref ProcessEntry32 entry);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    internal static (double CpuMilliseconds, long WorkingSetBytes) CurrentProcessTreeUsage()
+    {
+        var cpuMilliseconds = 0.0;
+        long workingSetBytes = 0;
+        using (var self = Process.GetCurrentProcess())
+        {
+            AddProcessUsage(self, ref cpuMilliseconds, ref workingSetBytes);
+            var children = ReadChildProcessIds();
+            var rootId = self.Id;
+            var pending = new Queue<int>();
+            var visited = new HashSet<int> { rootId };
+            pending.Enqueue(rootId);
+            while (pending.Count > 0)
+            {
+                if (!children.TryGetValue(pending.Dequeue(), out var childIds)) continue;
+                foreach (var childId in childIds)
+                {
+                    if (!visited.Add(childId)) continue;
+                    pending.Enqueue(childId);
+                    try
+                    {
+                        using var child = Process.GetProcessById(childId);
+                        AddProcessUsage(child, ref cpuMilliseconds, ref workingSetBytes);
+                    }
+                    catch (ArgumentException) { }
+                    catch (InvalidOperationException) { }
+                }
+            }
+        }
+        return (cpuMilliseconds, workingSetBytes);
+    }
+
+    private static Dictionary<int, List<int>> ReadChildProcessIds()
+    {
+        var children = new Dictionary<int, List<int>>();
+        var snapshot = CreateToolhelp32Snapshot(Th32CsSnapProcess, 0);
+        if (snapshot == IntPtr.Zero || snapshot == new IntPtr(-1)) return children;
+        try
+        {
+            var entry = new ProcessEntry32 { dwSize = (uint)Marshal.SizeOf<ProcessEntry32>() };
+            if (!Process32First(snapshot, ref entry)) return children;
+            do
+            {
+                var parentId = (int)entry.th32ParentProcessID;
+                if (!children.TryGetValue(parentId, out var list))
+                    children[parentId] = list = new List<int>();
+                list.Add((int)entry.th32ProcessID);
+            }
+            while (Process32Next(snapshot, ref entry));
+        }
+        finally { CloseHandle(snapshot); }
+        return children;
+    }
+
+    private static void AddProcessUsage(Process process, ref double cpuMilliseconds, ref long workingSetBytes)
+    {
+        try
+        {
+            cpuMilliseconds += process.TotalProcessorTime.TotalMilliseconds;
+            workingSetBytes += process.WorkingSet64;
+        }
+        catch (InvalidOperationException) { }
+        catch (System.ComponentModel.Win32Exception) { }
+    }
 
     internal static void LogError(string context, Exception exception)
     {
@@ -259,6 +362,18 @@ internal static class Program
 
     internal static string ApplicationDirectory => AppContext.BaseDirectory;
     internal static string DataDirectory => Path.Combine(ApplicationDirectory, "ресурсы");
+    internal static Action<string>? SetupProgress { get; set; }
+    private static void ReportSetupOutput(string line)
+    {
+        if (line.Contains("Downloading", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("Collecting ", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("Installing collected packages", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("Building wheel", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("Preparing metadata", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("Retrying", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("Starting new HTTPS connection", StringComparison.OrdinalIgnoreCase))
+            SetupProgress?.Invoke(line.Trim());
+    }
     internal static string ModelCacheDirectory => Path.Combine(DataDirectory, "модели");
 
     private static string ExtractEmbeddedFile(string resourceName, string fileName)
@@ -276,6 +391,7 @@ internal static class Program
     {
         Directory.CreateDirectory(DataDirectory);
         Directory.CreateDirectory(ModelCacheDirectory);
+        SetupProgress?.Invoke("Проверяю локальное окружение Python…");
         var script = ExtractEmbeddedFile("DSR.ruaccent_worker.py", "ruaccent_worker.py");
         var requirements = ExtractEmbeddedFile("DSR.requirements.txt", "requirements.txt");
         var pythonEnvironment = Path.Combine(DataDirectory, "python");
@@ -284,6 +400,7 @@ internal static class Program
 
         if (!File.Exists(python))
         {
+            SetupProgress?.Invoke("Создаю локальное окружение Python…");
             var version = RunCommand(systemPython, "-c", "import sys; print(sys.version_info[0] * 100 + sys.version_info[1]); raise SystemExit(0 if sys.version_info >= (3, 10) else 1)");
             if (version.ExitCode != 0)
                 throw new InvalidOperationException($"Для первого запуска нужен Python 3.10+ и доступ к интернету. {version.Output}");
@@ -295,6 +412,7 @@ internal static class Program
         var check = RunCommand(python, "-c", "import ruaccent, onnxruntime; print('ok')");
         if (check.ExitCode != 0)
         {
+            SetupProgress?.Invoke("Устанавливаю RUAccent и ONNX Runtime; идёт скачивание зависимостей…");
             // Repair only required inference packages, without optional torch/crfsuite.
             var install = RunCommand(python, "-m", "pip", "install", "--upgrade", "ruaccent @ git+https://github.com/Den4ikAI/ruaccent.git@3ac0ad5f6508f6c1a4a604220042232c70a7baf9", "onnxruntime");
             if (install.ExitCode != 0)
@@ -371,11 +489,31 @@ internal static class Program
         start.Environment["PIP_DISABLE_PIP_VERSION_CHECK"] = "1";
         ConfigureResourceEnvironment(start);
         foreach (var argument in arguments) start.ArgumentList.Add(argument);
-        using var process = Process.Start(start) ?? throw new InvalidOperationException($"Не удалось запустить {executable}.");
-        var stdout = process.StandardOutput.ReadToEndAsync();
-        var stderr = process.StandardError.ReadToEndAsync();
+        return RunCommand(start);
+    }
+
+    private static (int ExitCode, string Output) RunCommand(ProcessStartInfo start)
+    {
+        Directory.CreateDirectory(DataDirectory);
+        using var process = Process.Start(start) ?? throw new InvalidOperationException($"Не удалось запустить {start.FileName}.");
+        var stdout = new StringBuilder();
+        var stderr = new StringBuilder();
+        process.OutputDataReceived += (_, e) =>
+        {
+            if (e.Data == null) return;
+            stdout.AppendLine(e.Data);
+            ReportSetupOutput(e.Data);
+        };
+        process.ErrorDataReceived += (_, e) =>
+        {
+            if (e.Data == null) return;
+            stderr.AppendLine(e.Data);
+            ReportSetupOutput(e.Data);
+        };
+        process.BeginOutputReadLine();
+        process.BeginErrorReadLine();
         process.WaitForExit();
-        return (process.ExitCode, (stdout.GetAwaiter().GetResult() + Environment.NewLine + stderr.GetAwaiter().GetResult()).Trim());
+        return (process.ExitCode, (stdout.ToString() + Environment.NewLine + stderr.ToString()).Trim());
     }
 
     internal static GpuProbeResult ProbeGpu()
@@ -549,7 +687,7 @@ internal static class Program
     }
 
     private static void ConvertTextFile(string inputPath, string outputPath, string model, string device,
-        Action<string> report, Action<int, int> reportProgress, ConversionControl control, ConversionDiagnostics diagnostics)
+    Action<string> report, Action<int, int> reportProgress, ConversionControl control, ConversionDiagnostics diagnostics)
     {
         var sourceBytes = File.ReadAllBytes(inputPath);
         var text = DecodeText(sourceBytes);
@@ -567,23 +705,55 @@ internal static class Program
         var result = new StringBuilder(text.Length + 64);
         var completed = 0;
         TimeSpan? estimatedRemaining = null;
+        var contents = new string[lines.Length];
+        var endings = new string[lines.Length];
+        var accentedLines = new string?[lines.Length];
         for (var i = 0; i < lines.Length; i++)
         {
-            control.Checkpoint();
             var line = lines[i];
             var ending = line.EndsWith("\r", StringComparison.Ordinal) ? "\r" : "";
-            var content = ending.Length == 0 ? line : line[..^1];
-            if (!string.IsNullOrWhiteSpace(content))
+            contents[i] = ending.Length == 0 ? line : line[..^1];
+            endings[i] = ending;
+        }
+        // Batch independent lines so the worker can accent them concurrently
+        // instead of one blocking request/response round-trip per line.
+        const int inferenceBatchSize = 128;
+        for (var batchStart = 0; batchStart < lines.Length; batchStart += inferenceBatchSize)
+        {
+            control.Checkpoint();
+            var batchEnd = Math.Min(batchStart + inferenceBatchSize, lines.Length);
+            var indices = new List<int>();
+            var inputs = new List<string>();
+            for (var i = batchStart; i < batchEnd; i++)
             {
+                if (string.IsNullOrWhiteSpace(contents[i])) continue;
+                indices.Add(i);
+                inputs.Add(ApplyUserDictionary(contents[i]));
+            }
+            (string? Text, string? Error)[] outputs = inputs.Count > 0
+                ? accentizer.ProcessBatch(inputs)
+                : Array.Empty<(string?, string?)>();
+            for (var k = 0; k < indices.Count; k++)
+            {
+                var i = indices[k];
+                var content = contents[i];
+                var inference = outputs[k];
+                if (inference.Error != null)
+                {
+                    diagnostics.FailedUnits++;
+                    diagnostics.Events.Add($"Строка {i + 1}: {inference.Error}");
+                    LogError($"Строка оставлена без изменений: {TruncateForLog(content)}", new InvalidOperationException(inference.Error));
+                    accentedLines[i] = content;
+                    continue;
+                }
                 try
                 {
-                    var modelOutput = RuAccentMarker.Replace(accentizer.Process(ApplyUserDictionary(content)), "\u0301");
+                    var modelOutput = RuAccentMarker.Replace(inference.Text ?? content, "\u0301");
                     var modelProcessed = ProtectUnstressedWords(EnsureDialogueInitialWordAccent(content, modelOutput, accentizer));
                     var modelProcessedWithPunctuation = EnsureOriginalPunctuation(content, modelProcessed);
-                    var accented = ApplyYoDictionary(modelProcessedWithPunctuation);
-                    result.Append(accented);
+                    accentedLines[i] = ApplyYoDictionary(modelProcessedWithPunctuation);
                     var reviewCountBefore = wordReview.Count;
-                    CollectUnrecognizedWords(content, accented, wordReview);
+                    CollectUnrecognizedWords(content, accentedLines[i]!, wordReview);
                     diagnostics.UnrecognizedWordCount += CountReviewWords(wordReview.Skip(reviewCountBefore));
                 }
                 catch (Exception ex)
@@ -593,23 +763,23 @@ internal static class Program
                     // Keep the original line untouched so a single problem line
                     // never aborts the whole conversion.
                     LogError($"Строка оставлена без изменений: {TruncateForLog(content)}", ex);
-                    result.Append(content);
+                    accentedLines[i] = content;
                 }
             }
-            else result.Append(content);
-            result.Append(ending);
-            if (i + 1 < lines.Length) result.Append('\n');
-            completed = i + 1;
+            completed = batchEnd;
             diagnostics.CompletedUnits = completed;
-            if (completed == lines.Length || completed % 10 == 0)
-            {
-                estimatedRemaining = completed > 0
-                    ? TimeSpan.FromSeconds(conversionTimer.Elapsed.TotalSeconds * (lines.Length - completed) / completed)
-                    : null;
-                report($"Прогресс {completed}/{lines.Length}; прошло {conversionTimer.Elapsed:hh\\:mm\\:ss}; осталось {(estimatedRemaining.HasValue ? estimatedRemaining.Value.ToString("hh\\:mm\\:ss") : "расчёт…")}");
-                LogConversion(inputPath, bytesIn, text.Length, conversionTimer.Elapsed, estimatedRemaining, $"Обработка {completed}/{lines.Length}");
-                reportProgress(completed, lines.Length);
-            }
+            estimatedRemaining = completed > 0
+                ? TimeSpan.FromSeconds(conversionTimer.Elapsed.TotalSeconds * (lines.Length - completed) / completed)
+                : null;
+            report($"Прогресс {completed}/{lines.Length}; прошло {conversionTimer.Elapsed:hh\\:mm\\:ss}; осталось {(estimatedRemaining.HasValue ? estimatedRemaining.Value.ToString("hh\\:mm\\:ss") : "расчёт…")}");
+            LogConversion(inputPath, bytesIn, text.Length, conversionTimer.Elapsed, estimatedRemaining, $"Обработка {completed}/{lines.Length}");
+            reportProgress(completed, lines.Length);
+        }
+        for (var i = 0; i < lines.Length; i++)
+        {
+            result.Append(accentedLines[i] ?? contents[i]);
+            result.Append(endings[i]);
+            if (i + 1 < lines.Length) result.Append('\n');
         }
         control.Checkpoint();
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(outputPath))!);
@@ -670,8 +840,6 @@ internal static class Program
 
     internal sealed record WordReviewEntry(string Word, string Context, string Proposed);
     internal sealed record DeclensionCorrection(string Lemma, string Form, string Case, string Context);
-    internal sealed record WordReviewCorrection(string SourceWord, string Corrected, string Context);
-    internal sealed record WordReviewCaseCorrection(string SourceWord, string Corrected, string Context, int ContextOccurrence);
     internal sealed record WordReviewPatternCorrection(string SourceWord, string Corrected, string? ExcludedContext, int ExcludedOccurrence);
 
     private static void CollectUnrecognizedWords(string source, string converted, List<string> report)
@@ -929,14 +1097,6 @@ internal static class Program
         var applied = ApplyWordReplacementMapToFb2(inputPath, outputPath, correctionMap);
         LogReview($"Словоформы: заменено вхождений {applied}");
         return applied;
-    }
-
-    internal static int ApplyReviewCorrectionsToFb2(string outputPath, IEnumerable<WordReviewCorrection> corrections)
-    {
-        var correctionMap = corrections
-            .GroupBy(correction => NormalizeWordLetters(correction.SourceWord).ToLowerInvariant(), StringComparer.OrdinalIgnoreCase)
-            .ToDictionary(group => group.Key, group => group.Last().Corrected, StringComparer.OrdinalIgnoreCase);
-        return ApplyWordReplacementMapToFb2(outputPath, outputPath, correctionMap);
     }
 
     internal static Dictionary<string, int> CountReviewWordOccurrences(string outputPath, IEnumerable<string> words)
@@ -1232,135 +1392,6 @@ internal static class Program
         return false;
     }
 
-    private sealed class LexicalXmlScanner
-    {
-        private readonly string _xml;
-        private readonly List<(int Start, int Length, bool IsCData)> _textNodes = new();
-        private int _depth;
-        private bool _inTag;
-        private bool _inComment;
-        private bool _inCData;
-        private int _tagStart;
-        private bool _tagIsSpecial;
-        private bool _tagIsClosing;
-        private int _textStart = -1;
-
-        internal LexicalXmlScanner(string xml)
-        {
-            _xml = xml;
-            Scan();
-        }
-
-        internal List<(int Start, int Length, bool IsCData)> TextNodes() => _textNodes;
-
-        private void Scan()
-        {
-            for (var i = 0; i < _xml.Length; i++)
-            {
-                // Переходы вперёд оставляют i на последнем символе конструкции, а обычный
-                // continue прибавляет ещё один, поэтому смещения здесь всегда на единицу меньше.
-                if (_inComment)
-                {
-                    if (_xml.AsSpan(i, 2).SequenceEqual("--"))
-                    {
-                        i += 2;
-                        _inComment = false;
-                        _textStart = _depth > 0 ? i + 1 : -1;
-                    }
-                    continue;
-                }
-                if (_inCData)
-                {
-                    if (_xml.AsSpan(i, 2).SequenceEqual("]]"))
-                    {
-                        // Пустая секция CDATA тоже занимает место в дереве, поэтому
-                        // диапазон добавляется всегда — иначе индексы разъедутся.
-                        _textNodes.Add((_textStart, i - _textStart, true));
-                        i += 2;
-                        _inCData = false;
-                        _textStart = _depth > 0 ? i + 1 : -1;
-                    }
-                    continue;
-                }
-                if (!_inTag && _xml.AsSpan(i).StartsWith("<!--"))
-                {
-                    FlushText(i);
-                    _inComment = true;
-                    i += 3;
-                    continue;
-                }
-                if (!_inTag && _xml.AsSpan(i).StartsWith("<![CDATA["))
-                {
-                    FlushText(i);
-                    _textStart = i + 9;
-                    _inCData = true;
-                    i += 8;
-                    continue;
-                }
-                var ch = _xml[i];
-                if (ch == '<' && !_inTag)
-                {
-                    // Текст перед закрывающим тегом корня дерево отбрасывает,
-                    // поэтому хвостовой прогон в конце файла узлом не становится.
-                    var closingRoot = _depth == 1 && i + 1 < _xml.Length && _xml[i + 1] == '/';
-                    if (closingRoot) _textStart = -1;
-                    else FlushText(i);
-                    _tagStart = i;
-                    _tagIsClosing = i + 1 < _xml.Length && _xml[i + 1] == '/';
-                    _tagIsSpecial = i + 1 < _xml.Length && _xml[i + 1] is '!' or '?';
-                    _inTag = true;
-                }
-                else if (ch == '>' && _inTag)
-                {
-                    if (!_tagIsSpecial)
-                    {
-                        if (_tagIsClosing) _depth = Math.Max(0, _depth - 1);
-                        else
-                        {
-                            var beforeClose = i - 1;
-                            while (beforeClose > _tagStart && char.IsWhiteSpace(_xml[beforeClose])) beforeClose--;
-                            var isSelfClosing = _xml[beforeClose] == '/';
-                            // Открытие корня поднимает глубину до 1; вложенные элементы — на 1.
-                            if (_depth == 0) _depth = isSelfClosing ? 0 : 1;
-                            else if (!isSelfClosing && _xml[_tagStart + 1] != '/') _depth++;
-                        }
-                    }
-                    _inTag = false;
-                    // Текст вне корневого элемента в дерево не входит (текст между
-                    // объявлением <?xml?> и <FictionBook> узлом не является).
-                    _textStart = _depth > 0 ? i + 1 : -1;
-                }
-            }
-            // Хвостовой текст вне корневого элемента в дерево не попадает
-            // (последний \r\n после </FictionBook> узлом не становится).
-            if (_depth > 0 && _textStart >= 0 && _textStart < _xml.Length)
-                _textNodes.Add((_textStart, _xml.Length - _textStart, false));
-        }
-
-        // Добавляет текстовый узел только если в нём есть содержимое: пустой XText
-        // между элементами не создаётся, и сдвигать индекс нельзя.
-        private void FlushText(int end)
-        {
-            if (_depth > 0 && _textStart >= 0 && end > _textStart) _textNodes.Add((_textStart, end - _textStart, false));
-            _textStart = -1;
-        }
-    }
-
-    private static string DecodeXmlTextFragment(string fragment)
-    {
-        try
-        {
-            var wrapped = XDocument.Parse("<r>" + fragment + "</r>", LoadOptions.PreserveWhitespace);
-            return string.Concat(wrapped.Root!.Nodes().Select(node => node is XText text ? text.Value : node.ToString(SaveOptions.DisableFormatting)));
-        }
-        catch (System.Xml.XmlException)
-        {
-            // Серверы и словари иногда отдают FB2 с экранированными XML-сущностями внутри
-            // текста (например, &amp;quot;). В этом случае фрагмент можно сопоставить только буквально.
-            return null!;
-        }
-    }
-
     private static string EscapeXmlTextForLexicalMatch(string text) =>
         text.Replace("&", "&amp;", StringComparison.Ordinal)
             .Replace("<", "&lt;", StringComparison.Ordinal)
@@ -1393,51 +1424,6 @@ internal static class Program
         return occurrence;
     }
 
-    internal static int ApplyReviewCaseCorrectionsToFb2(string outputPath, IEnumerable<WordReviewCaseCorrection> corrections)
-    {
-        var entries = corrections.ToArray();
-        if (entries.Length == 0) return 0;
-        var bytes = File.ReadAllBytes(outputPath);
-        _ = new Fb2Parser().Parse(bytes);
-        var document = XDocument.Parse(DecodeXml(bytes), LoadOptions.PreserveWhitespace);
-        var root = document.Root ?? throw new InvalidDataException("В итоговом FB2 отсутствует корневой элемент.");
-        var ns = root.Name.Namespace;
-        var imageIds = root.Descendants().Where(element => element.Name.Namespace == ns && element.Name.LocalName == "image")
-            .Select(element => (string?)element.Attribute(XName.Get("href", "http://www.w3.org/1999/xlink")))
-            .Where(href => !string.IsNullOrWhiteSpace(href) && href!.StartsWith('#')).Select(href => href![1..]).ToHashSet(StringComparer.Ordinal);
-        var binaryNodes = root.DescendantsAndSelf().Where(element => element.Name.Namespace == ns && element.Name.LocalName == "binary" && imageIds.Contains((string?)element.Attribute("id") ?? ""))
-            .SelectMany(element => element.DescendantNodes().OfType<XText>()).ToHashSet();
-        var originalTextNodes = root.DescendantNodes().OfType<XText>().ToArray();
-        var nodes = root.DescendantsAndSelf().Where(element => element.Name.Namespace == ns && TextElements.Contains(element.Name.LocalName))
-            .SelectMany(element => element.DescendantNodes().OfType<XText>()).Where(node => !binaryNodes.Contains(node)).Distinct().ToArray();
-        var replacements = 0;
-        foreach (var correction in entries)
-        {
-            var context = SplitReviewContext(correction.Context).Context;
-            foreach (var node in nodes)
-            {
-                var contextStart = node.Value.IndexOf(context, StringComparison.Ordinal);
-                if (contextStart < 0) continue;
-                var span = node.Value.Substring(contextStart, context.Length);
-                var updated = WordTokens.Replace(span, match =>
-                    string.Equals(NormalizeWordLetters(match.Value), NormalizeWordLetters(correction.SourceWord), StringComparison.OrdinalIgnoreCase)
-                        ? correction.Corrected : match.Value);
-                if (updated == span) continue;
-                node.Value = node.Value[..contextStart] + updated + node.Value[(contextStart + context.Length)..];
-                replacements++;
-                break;
-            }
-        }
-        if (replacements > 0)
-        {
-            if (!originalTextNodes.SequenceEqual(root.DescendantNodes().OfType<XText>()))
-                throw new InvalidDataException("Изменился состав XML-текстовых узлов; безопасно сохранить исходную структуру FB2 невозможно.");
-            SaveFb2PreservingSourceStructure(outputPath, outputPath, document);
-            _ = new Fb2Parser().Parse(File.ReadAllBytes(outputPath));
-        }
-        return replacements;
-    }
-
     private static int ApplyWordReplacementMapToFb2(string inputPath, string outputPath, Dictionary<string, string> correctionMap)
     {
         if (correctionMap.Count == 0) return 0;
@@ -1451,6 +1437,7 @@ internal static class Program
             .Where(href => !string.IsNullOrWhiteSpace(href) && href!.StartsWith('#')).Select(href => href![1..]).ToHashSet(StringComparer.Ordinal);
         var binaryNodes = root.DescendantsAndSelf().Where(element => element.Name.Namespace == ns && element.Name.LocalName == "binary" && imageIds.Contains((string?)element.Attribute("id") ?? ""))
             .SelectMany(element => element.DescendantNodes().OfType<XText>()).ToHashSet();
+        var originalTextNodes = root.DescendantNodes().OfType<XText>().ToArray();
         var replacements = 0;
         foreach (var node in root.DescendantsAndSelf().Where(element => element.Name.Namespace == ns && TextElements.Contains(element.Name.LocalName))
             .SelectMany(element => element.DescendantNodes().OfType<XText>()).Where(node => !binaryNodes.Contains(node)).Distinct())
@@ -1465,16 +1452,13 @@ internal static class Program
             if (!string.Equals(updated, node.Value, StringComparison.Ordinal)) node.Value = updated;
         }
         if (replacements == 0) return 0;
-        var temporary = outputPath + ".review.tmp";
-        try
-        {
-            using (var writer = XmlWriter.Create(temporary, new XmlWriterSettings { Encoding = new UTF8Encoding(false), Indent = false, OmitXmlDeclaration = document.Declaration == null, NewLineHandling = NewLineHandling.None }))
-                document.Save(writer);
-            _ = new Fb2Parser().Parse(File.ReadAllBytes(temporary));
-            File.Move(temporary, outputPath, overwrite: true);
-            return replacements;
-        }
-        finally { if (File.Exists(temporary)) File.Delete(temporary); }
+        // Reuse the structure-preserving writer used by the review path so applying
+        // saved forms never drops comments, CDATA or the original FB2 formatting.
+        if (!originalTextNodes.SequenceEqual(root.DescendantNodes().OfType<XText>()))
+            throw new InvalidDataException("Изменился состав XML-текстовых узлов; безопасно сохранить исходную структуру FB2 невозможно.");
+        SaveFb2PreservingSourceStructure(inputPath, outputPath, document);
+        _ = new Fb2Parser().Parse(File.ReadAllBytes(outputPath));
+        return replacements;
     }
 
     private static Dictionary<string, string> LoadYoDictionary()
@@ -1528,9 +1512,9 @@ internal static class Program
         });
     }
 
-    private static Dictionary<string, string> LoadUserDictionary()
+    private static ConcurrentDictionary<string, string> LoadUserDictionary()
     {
-        var replacements = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var replacements = new ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         if (!File.Exists(UserDictionaryPath)) return replacements;
         foreach (var line in File.ReadAllLines(UserDictionaryPath, Encoding.UTF8))
         {
@@ -1791,53 +1775,75 @@ internal static class Program
         // Binary image payloads are excluded from inference regardless of whether
         // they are preserved in the output. Keep their original XML nodes untouched.
 
-        foreach (var textNode in processableText)
+        // Send independent text nodes to the worker in batches. The worker accents
+        // them concurrently, hiding the per-node ONNX latency that left the CPU and
+        // GPU idle in the previous one-request-at-a-time loop.
+        const int inferenceBatchSize = 64;
+        accentizer.EnsureStarted();
+        for (var batchStart = 0; batchStart < processableText.Length; batchStart += inferenceBatchSize)
         {
             control?.Checkpoint();
-            if (string.IsNullOrWhiteSpace(textNode.Value)) continue;
-            var sourceText = textNode.Value;
-            // Apply the local ё lexicon before inference and keep replacements even
-            // if the model later adds stress marks or otherwise normalizes the word.
-            // Модель загружается только при первом реальном запросе — тогда результат
-            // заведомо появится, а первая загрузка не завершит процесс раньше времени.
-            accentizer.EnsureStarted();
-            try
+            var batchCount = Math.Min(inferenceBatchSize, processableText.Length - batchStart);
+            var batchInputs = new string[batchCount];
+            for (var offset = 0; offset < batchCount; offset++)
+                batchInputs[offset] = ApplyUserDictionary(processableText[batchStart + offset].Value);
+            var batchOutputs = accentizer.ProcessBatch(batchInputs);
+            for (var offset = 0; offset < batchCount; offset++)
             {
-                var modelOutput = RuAccentMarker.Replace(accentizer.Process(ApplyUserDictionary(sourceText)), "\u0301");
-                var modelProcessed = ProtectUnstressedWords(EnsureDialogueInitialWordAccent(sourceText, modelOutput, accentizer));
-                var modelProcessedWithPunctuation = EnsureOriginalPunctuation(sourceText, modelProcessed);
-                var accented = ApplyYoDictionary(modelProcessedWithPunctuation);
-                var reviewCountBefore = wordReview.Count;
-                CollectUnrecognizedWords(sourceText, accented, wordReview);
-                if (diagnostics != null) diagnostics.UnrecognizedWordCount += CountReviewWords(wordReview.Skip(reviewCountBefore));
-                if (!string.Equals(accented, sourceText, StringComparison.Ordinal))
+                control?.Checkpoint();
+                var textNode = processableText[batchStart + offset];
+                var sourceText = textNode.Value;
+                var inference = batchOutputs[offset];
+                completedText++;
+                if (inference.Error != null)
                 {
-                    textNode.Value = accented;
-                    changed++;
+                    if (diagnostics != null)
+                    {
+                        diagnostics.FailedUnits++;
+                        diagnostics.Events.Add($"Фрагмент {completedText}: {inference.Error}");
+                    }
+                    LogError($"Фрагмент оставлен без изменений: {TruncateForLog(sourceText)}", new InvalidOperationException(inference.Error));
                 }
-                if (!string.Equals(accented, modelOutput, StringComparison.Ordinal))
-                    normalized++;
-            }
-            catch (Exception ex)
-            {
-                if (diagnostics != null)
+                else
                 {
-                    diagnostics.FailedUnits++;
-                    diagnostics.Events.Add($"Фрагмент {completedText + 1}: {ex}");
+                    try
+                    {
+                        var modelOutput = RuAccentMarker.Replace(inference.Text ?? sourceText, "\u0301");
+                        var modelProcessed = ProtectUnstressedWords(EnsureDialogueInitialWordAccent(sourceText, modelOutput, accentizer));
+                        var modelProcessedWithPunctuation = EnsureOriginalPunctuation(sourceText, modelProcessed);
+                        var accented = ApplyYoDictionary(modelProcessedWithPunctuation);
+                        var reviewCountBefore = wordReview.Count;
+                        CollectUnrecognizedWords(sourceText, accented, wordReview);
+                        if (diagnostics != null) diagnostics.UnrecognizedWordCount += CountReviewWords(wordReview.Skip(reviewCountBefore));
+                        if (!string.Equals(accented, sourceText, StringComparison.Ordinal))
+                        {
+                            textNode.Value = accented;
+                            changed++;
+                        }
+                        if (!string.Equals(accented, modelOutput, StringComparison.Ordinal))
+                            normalized++;
+                    }
+                    catch (Exception ex)
+                    {
+                        if (diagnostics != null)
+                        {
+                            diagnostics.FailedUnits++;
+                            diagnostics.Events.Add($"Фрагмент {completedText}: {ex}");
+                        }
+                        // Keep the original fragment untouched so a single problem fragment
+                        // never aborts the whole conversion.
+                        LogError($"Фрагмент оставлен без изменений: {TruncateForLog(sourceText)}", ex);
+                    }
                 }
-                // Keep the original fragment untouched so a single problem fragment
-                // never aborts the whole conversion.
-                LogError($"Фрагмент оставлен без изменений: {TruncateForLog(sourceText)}", ex);
-            }
-            completedText++;
-            if (diagnostics != null) diagnostics.CompletedUnits = completedText;
-            if (completedText == processableText.Length || completedText % 10 == 0)
-            {
-                var remaining = completedText > 0
-                    ? TimeSpan.FromSeconds(conversionTimer.Elapsed.TotalSeconds * (processableText.Length - completedText) / completedText)
-                    : (TimeSpan?)null;
-                LogConversion(inputPath, byteCount, characterCount, conversionTimer.Elapsed, remaining, $"Обработка {completedText}/{processableText.Length}");
-                reportProgress?.Invoke(completedText, processableText.Length);
+                if (diagnostics != null) diagnostics.CompletedUnits = completedText;
+                if (completedText == processableText.Length || completedText % 10 == 0)
+                {
+                    var remaining = completedText > 0
+                        ? TimeSpan.FromSeconds(conversionTimer.Elapsed.TotalSeconds * (processableText.Length - completedText) / completedText)
+                        : (TimeSpan?)null;
+                    LogConversion(inputPath, byteCount, characterCount, conversionTimer.Elapsed, remaining, $"Обработка {completedText}/{processableText.Length}");
+                    reportProgress?.Invoke(completedText, processableText.Length);
+                }
             }
         }
 
@@ -2095,6 +2101,42 @@ internal static class Program
                 if (result.RootElement.TryGetProperty("error", out var error))
                     throw new InvalidOperationException(error.GetString() ?? "Ошибка ruaccent");
                 return result.RootElement.GetProperty("text").GetString() ?? text;
+            }
+        }
+
+        // Sends a batch of independent text nodes in one request. The worker
+        // processes them concurrently, which overlaps the many tiny ONNX
+        // sessions that made the sequential request/response loop latency-bound.
+        // Results are returned in input order; a failed node carries its error.
+        public (string? Text, string? Error)[] ProcessBatch(IReadOnlyList<string> texts)
+        {
+            if (texts.Count == 0) return Array.Empty<(string?, string?)>();
+            lock (_sync)
+            {
+                var process = _process ?? throw new InvalidOperationException("ruaccent не запущен.");
+                var json = JsonSerializer.Serialize(texts);
+                process.StandardInput.WriteLine(json);
+                process.StandardInput.Flush();
+                var response = process.StandardOutput.ReadLine();
+                if (response == null)
+                    throw new InvalidOperationException("Процесс ruaccent завершился без ответа.");
+                using var document = JsonDocument.Parse(response);
+                if (document.RootElement.ValueKind != JsonValueKind.Array)
+                    throw new InvalidOperationException("ruaccent вернул неожиданный ответ на пакет.");
+                var results = new (string? Text, string? Error)[texts.Count];
+                var index = 0;
+                foreach (var element in document.RootElement.EnumerateArray())
+                {
+                    if (index >= results.Length) break;
+                    if (element.TryGetProperty("error", out var error))
+                        results[index] = (null, error.GetString() ?? "Ошибка ruaccent");
+                    else if (element.TryGetProperty("text", out var value))
+                        results[index] = (value.GetString(), null);
+                    index++;
+                }
+                if (index != texts.Count)
+                    throw new InvalidOperationException("ruaccent вернул неполный ответ на пакет.");
+                return results;
             }
         }
 
