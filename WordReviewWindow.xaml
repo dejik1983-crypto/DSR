@@ -1,7 +1,7 @@
 <Window x:Class="FB2AccentConverter.WordReviewWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Проверка ударений и словоформ" Width="1260" Height="860"
+        Title="Проверка ударений и словоформ" Width="1260" Height="900"
         MinWidth="1040" MinHeight="700" WindowStartupLocation="CenterOwner"
         Background="#F4EDDD" Foreground="#3F3025"
         FontFamily="Segoe UI" FontSize="13">
@@ -95,11 +95,69 @@
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="8" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="8" />
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
 
-        <Border Grid.Row="0" Style="{StaticResource PaperCard}" Padding="14,10,14,8">
+        <!-- 1. Движок ИИ: чем подсказывать ударения -->
+        <Border Grid.Row="0" Style="{StaticResource PaperCard}" Padding="14,10,14,10">
             <StackPanel>
+                <TextBlock Text="1. ДВИЖОК ДЛЯ ПОДСКАЗОК ИИ" Style="{StaticResource SectionHeader}" Margin="0,0,0,6" />
+                <WrapPanel VerticalAlignment="Center">
+                    <TextBlock Text="Способ:" VerticalAlignment="Center" Margin="0,0,8,0" />
+                    <ComboBox x:Name="LlmProviderComboBox" Width="270"
+                              ToolTip="Своя модель на диске — файлы в папке ресурсы\модели\llm. Ollama — ваш локальный сервер. Внешний API — сервис с OpenAI-совместимым интерфейсом (OpenAI, OpenRouter, LM Studio, llama.cpp, vLLM)." />
+                    <CheckBox x:Name="LlmReuseCheckBox" Margin="18,0,0,0" VerticalAlignment="Center"
+                              Content="Не переспрашивать слова, на которые уже есть подсказка"
+                              ToolTip="Включено: если подсказка для слова уже есть (у любого движка), слово не отправляется. Снимите галочку, чтобы новый движок проверил заново все слова, по которым отвечали другие; собственные прежние ответы движка и слова из списка «без ответа» остаются." />
+                </WrapPanel>
+
+                <DockPanel x:Name="LlmLocalPanel" Margin="0,8,0,0">
+                    <Button x:Name="LlmLocalRefreshButton" DockPanel.Dock="Right" Content="Обновить" Padding="10,6" Margin="8,0,0,0" />
+                    <ComboBox x:Name="LlmModelComboBox"
+                              ToolTip="Всё, что лежит в ресурсы\модели\llm и содержит genai_config.json. Чтобы добавить модель, положите её папку туда — она появится в списке." />
+                </DockPanel>
+
+                <DockPanel x:Name="LlmOllamaPanel" Margin="0,8,0,0">
+                    <Button x:Name="LlmOllamaRefreshButton" DockPanel.Dock="Right" Content="Список моделей" Padding="10,6" Margin="8,0,0,0" />
+                    <TextBlock Text="Адрес сервера:" VerticalAlignment="Center" Margin="0,0,6,0" />
+                    <TextBox x:Name="LlmOllamaUrlTextBox" Width="200" Margin="0,0,12,0" ToolTip="Обычно http://127.0.0.1:11434" />
+                    <TextBlock Text="Модель:" VerticalAlignment="Center" Margin="0,0,6,0" />
+                    <ComboBox x:Name="LlmOllamaModelComboBox" IsEditable="True" MinWidth="180"
+                              ToolTip="Имя модели в Ollama. Подходит любая загруженная модель, включая модели без цензуры: ollama pull имя-модели." />
+                </DockPanel>
+
+                <StackPanel x:Name="LlmApiPanel" Margin="0,8,0,0">
+                    <DockPanel>
+                        <Button x:Name="LlmApiRefreshButton" DockPanel.Dock="Right" Content="Список моделей" Padding="10,6" Margin="8,0,0,0" />
+                        <TextBlock Text="Адрес:" VerticalAlignment="Center" Margin="0,0,6,0" />
+                        <TextBox x:Name="LlmApiUrlTextBox" Width="260" Margin="0,0,12,0"
+                                 ToolTip="Адрес вместе с версией, например https://api.openai.com/v1" />
+                        <TextBlock Text="Ключ:" VerticalAlignment="Center" Margin="0,0,6,0" />
+                        <TextBox x:Name="LlmApiKeyTextBox" MinWidth="140"
+                                 ToolTip="Ключ сохраняется в файле ресурсы\llm-настройки.json в открытом виде — не передавайте этот файл другим. Вместо него можно задать переменную окружения DSR_LLM_API_KEY." />
+                    </DockPanel>
+                    <DockPanel Margin="0,6,0,0">
+                        <TextBlock Text="Модель:" VerticalAlignment="Center" Margin="0,0,6,0" />
+                        <ComboBox x:Name="LlmApiModelComboBox" IsEditable="True" MinWidth="240"
+                                  ToolTip="Например gpt-4o-mini, deepseek-chat, openrouter/... — имя зависит от сервиса." />
+                    </DockPanel>
+                </StackPanel>
+
+                <DockPanel Margin="0,10,0,0">
+                    <Button x:Name="LlmBenchmarkButton" DockPanel.Dock="Left" Content="Проверить движок: скорость и точность"
+                            ToolTip="Контрольные слова с заранее известным ударением (сверены со словарём RUAccent); каждое дано с обычным предложением-контекстом. Показывает, сколько ударений движок угадал и сколько времени это заняло: помогает выбрать движок для этого компьютера." />
+                    <TextBlock x:Name="LlmBenchmarkTextBlock" TextWrapping="Wrap" VerticalAlignment="Center" Margin="10,0,0,0" Foreground="{StaticResource MutedInk}" />
+                </DockPanel>
+                <TextBlock x:Name="LlmEngineTextBlock" TextWrapping="Wrap" Margin="0,6,0,0" Foreground="{StaticResource MutedInk}" />
+            </StackPanel>
+        </Border>
+
+        <!-- 2. Файлы -->
+        <Border Grid.Row="2" Style="{StaticResource PaperCard}" Padding="14,10,14,8">
+            <StackPanel>
+                <TextBlock Text="2. ФАЙЛЫ" Style="{StaticResource SectionHeader}" Margin="0,0,0,6" />
                 <DockPanel Margin="0,0,0,5">
                     <Button x:Name="ChooseReviewButton" DockPanel.Dock="Right" Content="Отчёт нераспознанных слов…" />
                     <TextBox x:Name="ReviewFileTextBox" IsReadOnly="True" MinWidth="420" />
@@ -115,73 +173,87 @@
             </StackPanel>
         </Border>
 
-        <Border Grid.Row="2" Style="{StaticResource PaperCard}">
-            <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="8" />
-                    <ColumnDefinition Width="1.2*" />
-                </Grid.ColumnDefinitions>
-                <DockPanel Grid.Column="0" Margin="0,0,6,0">
-                    <DockPanel DockPanel.Dock="Top" Margin="0,0,0,6">
-                        <ComboBox x:Name="SortModeComboBox" DockPanel.Dock="Right" Width="190" Margin="8,0,0,6" />
-                        <TextBlock Text="Поиск:" VerticalAlignment="Center" Margin="0,0,6,0" />
-                        <TextBox x:Name="SearchTextBox" MinWidth="210" Margin="0,0,0,6" ToolTip="Фильтр по слову или контексту" />
-                    </DockPanel>
-                    <TextBlock DockPanel.Dock="Top" Text="Выберите слово в верхнем списке, затем конкретный контекст ниже. Снимите флажок у контекста, чтобы исключить его из общей правки." TextWrapping="Wrap" Margin="0,0,0,8" />
-                    <StackPanel DockPanel.Dock="Bottom">
-                        <Button x:Name="ApplyAllButton" Content="Применить все правки → *_corrected" IsEnabled="False" Background="{StaticResource Accent}" Foreground="White" FontWeight="SemiBold" ToolTip="Применяет все внесённые правки по группам и сохранённые словоформы за один раз" />
-                        <Button x:Name="OpenCorrectionsButton" Content="Открыть файл форм слов" IsEnabled="False" />
-                        <DockPanel Margin="0,5">
-                            <Button x:Name="NextButton" DockPanel.Dock="Right" Content="Следующее ▶" IsEnabled="False" />
-                            <Button x:Name="PreviousButton" Content="◀ Предыдущее" IsEnabled="False" />
+        <!-- 3. Правки -->
+        <Border Grid.Row="4" Style="{StaticResource PaperCard}">
+            <DockPanel>
+                <TextBlock DockPanel.Dock="Top" Text="3. ПРОВЕРКА СЛОВ — ПРАВКИ И ПОДСКАЗКИ" Style="{StaticResource SectionHeader}" Margin="0,0,0,4" />
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="8" />
+                        <ColumnDefinition Width="1.2*" />
+                    </Grid.ColumnDefinitions>
+                    <DockPanel Grid.Column="0" Margin="0,0,6,0">
+                        <DockPanel DockPanel.Dock="Top" Margin="0,0,0,6">
+                            <ComboBox x:Name="SortModeComboBox" DockPanel.Dock="Right" Width="190" Margin="8,0,0,6" />
+                            <TextBlock Text="Поиск:" VerticalAlignment="Center" Margin="0,0,6,0" />
+                            <TextBox x:Name="SearchTextBox" MinWidth="210" Margin="0,0,0,6" ToolTip="Фильтр по слову или контексту" />
                         </DockPanel>
-                    </StackPanel>
-                    <Grid>
-                        <Grid.RowDefinitions><RowDefinition Height="*" /><RowDefinition Height="8" /><RowDefinition Height="*" /></Grid.RowDefinitions>
-                        <DockPanel Grid.Row="0">
-                            <TextBlock DockPanel.Dock="Top" Text="Группы слов" FontWeight="SemiBold" Margin="0,0,0,4" />
-                            <ListBox x:Name="WordGroupsListBox" MinWidth="250" SelectionMode="Single" DisplayMemberPath="Display" />
-                        </DockPanel>
-                        <GridSplitter Grid.Row="1" Height="8" HorizontalAlignment="Stretch" VerticalAlignment="Center" ResizeDirection="Rows" ResizeBehavior="PreviousAndNext" ShowsPreview="False" />
-                        <DockPanel Grid.Row="2" Margin="0,8,0,0">
-                            <TextBlock DockPanel.Dock="Top" Text="Контексты выбранной группы" FontWeight="SemiBold" Margin="0,0,0,4" />
-                            <ListBox x:Name="ContextsListBox" SelectionMode="Single" ItemTemplate="{StaticResource ReviewSampleTemplate}" />
-                        </DockPanel>
-                    </Grid>
-                </DockPanel>
-
-                <GridSplitter Grid.Column="1" Width="8" HorizontalAlignment="Center" VerticalAlignment="Stretch" ResizeDirection="Columns" ResizeBehavior="PreviousAndNext" ShowsPreview="False" />
-
-                <DockPanel Grid.Column="2" Margin="10,0,0,0">
-                    <WrapPanel DockPanel.Dock="Bottom" Margin="0,12,0,0">
-                        <Button x:Name="AddFormButton" Content="Добавить словоформу" />
-                        <Button x:Name="SaveCorrectionButton" Content="Применить всё и сохранить" IsEnabled="False" Background="{StaticResource Accent}" Foreground="White" ToolTip="Проходит по всем группам с правками и сохраняет результат одним файлом" />
-                    </WrapPanel>
-                    <DockPanel DockPanel.Dock="Top" Margin="0,8">
-                        <Button x:Name="ConfirmStressButton" DockPanel.Dock="Right" Content="Да ✓" MinWidth="86" Margin="8,0,0,0"
-                                Background="{StaticResource Accent}" Foreground="White" FontWeight="SemiBold"
-                                ToolTip="Сохранить это ударение без словоформ и перейти к следующей группе (Ctrl+Enter)" />
-                        <TextBlock Text="Исправленный вариант:" VerticalAlignment="Center" />
-                        <TextBox x:Name="CorrectionTextBox" MinWidth="240" Margin="8,0,0,0" />
-                    </DockPanel>
-                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-                        <StackPanel>
-                            <TextBlock Text="ТЕКУЩИЙ ФРАГМЕНТ" Style="{StaticResource SectionHeader}" Margin="0,0,0,6" />
-                            <TextBlock x:Name="ContextTextBlock" TextWrapping="Wrap" Margin="0,8" />
-                            <TextBlock Text="Правка применяется к точным совпадениям слова; отдельные предложения можно исключить флажками в списке контекстов. Правьте группы одну за другой, затем нажмите «Применить все правки»." TextWrapping="Wrap" Foreground="{StaticResource MutedInk}" Margin="0,2,0,6" />
-                            <TextBlock x:Name="SelectionCountTextBlock" Margin="8,0" VerticalAlignment="Center" />
-                            <TextBlock Text="УДАРЕНИЕ В СЛОВЕ" Style="{StaticResource SectionHeader}" />
-                            <TextBlock Text="Выберите ударную гласную или нажмите «ё» рядом с буквой е. Ё считается ударной автоматически. Если вариант в поле «Исправленный вариант» верный, нажмите «Да» — правка запомнится и откроется следующая группа. Если в слове опечатка, исправьте буквы прямо в поле — программа примет небольшое изменение букв и применит его к тексту." TextWrapping="Wrap" Foreground="{StaticResource MutedInk}" Margin="0,0,0,4" />
-                            <StackPanel x:Name="StressChoicesPanel" />
-                            <TextBlock Text="ДОПОЛНИТЕЛЬНЫЕ СЛОВОФОРМЫ" Style="{StaticResource SectionHeader}" />
-                            <TextBlock Text="Можно ввести форму вручную, вставить её или выбрать ударение/ё под полем." TextWrapping="Wrap" Foreground="{StaticResource MutedInk}" Margin="0,0,0,4" />
-                            <ComboBox x:Name="GrammaticalCaseComboBox" Width="260" Margin="0,6" />
-                            <StackPanel x:Name="DeclensionRowsPanel" />
+                        <TextBlock DockPanel.Dock="Top" Text="Выберите слово в верхнем списке, затем конкретный контекст ниже. Снимите флажок у контекста, чтобы исключить его из общей правки." TextWrapping="Wrap" Margin="0,0,0,8" />
+                        <StackPanel DockPanel.Dock="Bottom">
+                            <Button x:Name="ApplyAllButton" Content="Применить все правки → *_corrected" IsEnabled="False" Background="{StaticResource Accent}" Foreground="White" FontWeight="SemiBold" ToolTip="Применяет все внесённые правки по группам и сохранённые словоформы за один раз" />
+                            <Button x:Name="OpenCorrectionsButton" Content="Открыть файл форм слов" IsEnabled="False" />
+                            <DockPanel Margin="0,5">
+                                <Button x:Name="NextButton" DockPanel.Dock="Right" Content="Следующее ▶" IsEnabled="False" />
+                                <Button x:Name="PreviousButton" Content="◀ Предыдущее" IsEnabled="False" />
+                            </DockPanel>
                         </StackPanel>
-                    </ScrollViewer>
-                </DockPanel>
-            </Grid>
+                        <Grid>
+                            <Grid.RowDefinitions><RowDefinition Height="*" /><RowDefinition Height="8" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+                            <DockPanel Grid.Row="0">
+                                <TextBlock DockPanel.Dock="Top" Text="Группы слов" FontWeight="SemiBold" Margin="0,0,0,4" />
+                                <ListBox x:Name="WordGroupsListBox" MinWidth="250" SelectionMode="Single" DisplayMemberPath="Display" />
+                            </DockPanel>
+                            <GridSplitter Grid.Row="1" Height="8" HorizontalAlignment="Stretch" VerticalAlignment="Center" ResizeDirection="Rows" ResizeBehavior="PreviousAndNext" ShowsPreview="False" />
+                            <DockPanel Grid.Row="2" Margin="0,8,0,0">
+                                <TextBlock DockPanel.Dock="Top" Text="Контексты выбранной группы" FontWeight="SemiBold" Margin="0,0,0,4" />
+                                <ListBox x:Name="ContextsListBox" SelectionMode="Single" ItemTemplate="{StaticResource ReviewSampleTemplate}" />
+                            </DockPanel>
+                        </Grid>
+                    </DockPanel>
+
+                    <GridSplitter Grid.Column="1" Width="8" HorizontalAlignment="Center" VerticalAlignment="Stretch" ResizeDirection="Columns" ResizeBehavior="PreviousAndNext" ShowsPreview="False" />
+
+                    <DockPanel Grid.Column="2" Margin="10,0,0,0">
+                        <WrapPanel DockPanel.Dock="Bottom" Margin="0,12,0,0">
+                            <Button x:Name="LlmCheckButton" Content="Подсказки ИИ по контексту"
+                                    ToolTip="Выбранный в разделе 1 движок предложит ударение для слов, которых нет в словаре. Найденное показывается по каждому слову отдельно и применяется только вручную." />
+                            <Button x:Name="AddFormButton" Content="Добавить словоформу" />
+                            <Button x:Name="SaveCorrectionButton" Content="Применить всё и сохранить" IsEnabled="False" Background="{StaticResource Accent}" Foreground="White" ToolTip="Проходит по всем группам с правками и сохраняет результат одним файлом" />
+                        </WrapPanel>
+                        <Border x:Name="LlmHintPanel" DockPanel.Dock="Top" Margin="0,0,0,8" Padding="10,8"
+                                CornerRadius="6" Background="#FFF6E0" BorderBrush="{StaticResource Accent}"
+                                BorderThickness="1" Visibility="Collapsed">
+                            <StackPanel>
+                                <TextBlock Text="ПОДСКАЗКА ИИ ПО КОНТЕКСТУ" Style="{StaticResource SectionHeader}" Margin="0,0,0,4" />
+                                <TextBlock x:Name="LlmHintTextBlock" TextWrapping="Wrap" FontSize="14" />
+                            </StackPanel>
+                        </Border>
+                        <DockPanel DockPanel.Dock="Top" Margin="0,8">
+                            <Button x:Name="ConfirmStressButton" DockPanel.Dock="Right" Content="Да ✓" MinWidth="86" Margin="8,0,0,0"
+                                    Background="{StaticResource Accent}" Foreground="White" FontWeight="SemiBold"
+                                    ToolTip="Сохранить это ударение без словоформ и перейти к следующей группе (Ctrl+Enter)" />
+                            <TextBlock Text="Исправленный вариант:" VerticalAlignment="Center" />
+                            <TextBox x:Name="CorrectionTextBox" MinWidth="240" Margin="8,0,0,0" />
+                        </DockPanel>
+                        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                            <StackPanel>
+                                <TextBlock Text="ТЕКУЩИЙ ФРАГМЕНТ" Style="{StaticResource SectionHeader}" Margin="0,0,0,6" />
+                                <TextBlock x:Name="ContextTextBlock" TextWrapping="Wrap" Margin="0,8" />
+                                <TextBlock Text="Правка применяется к точным совпадениям слова; отдельные предложения можно исключить флажками в списке контекстов. Правьте группы одну за другой, затем нажмите «Применить все правки»." TextWrapping="Wrap" Foreground="{StaticResource MutedInk}" Margin="0,2,0,6" />
+                                <TextBlock x:Name="SelectionCountTextBlock" Margin="8,0" VerticalAlignment="Center" />
+                                <TextBlock Text="УДАРЕНИЕ В СЛОВЕ" Style="{StaticResource SectionHeader}" />
+                                <TextBlock Text="Выберите ударную гласную или нажмите «ё» рядом с буквой е. Ё считается ударной автоматически. Если вариант в поле «Исправленный вариант» верный, нажмите «Да» — правка запомнится и откроется следующая группа. Если в слове опечатка, исправьте буквы прямо в поле — программа примет небольшое изменение букв и применит его к тексту." TextWrapping="Wrap" Foreground="{StaticResource MutedInk}" Margin="0,0,0,4" />
+                                <StackPanel x:Name="StressChoicesPanel" />
+                                <TextBlock Text="ДОПОЛНИТЕЛЬНЫЕ СЛОВОФОРМЫ" Style="{StaticResource SectionHeader}" />
+                                <TextBlock Text="Можно ввести форму вручную, вставить её или выбрать ударение/ё под полем." TextWrapping="Wrap" Foreground="{StaticResource MutedInk}" Margin="0,0,0,4" />
+                                <ComboBox x:Name="GrammaticalCaseComboBox" Width="260" Margin="0,6" />
+                                <StackPanel x:Name="DeclensionRowsPanel" />
+                            </StackPanel>
+                        </ScrollViewer>
+                    </DockPanel>
+                </Grid>
+            </DockPanel>
         </Border>
     </Grid>
 </Window>

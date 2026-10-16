@@ -8,6 +8,7 @@ import pathlib
 import re
 import warnings
 import contextlib
+import gzip
 import io
 from concurrent.futures import ThreadPoolExecutor
 # Keep third-party initialization warnings and native-library notices out of
@@ -209,16 +210,33 @@ def install_download_progress(model_name: str) -> None:
     ruaccent_module.hf_hub_download = download_with_progress
 
 
-def configure_onnx_performance(accentizer) -> None:
-    # Report loaded ORT sessions and their active execution providers.
+def configure_onnx_performance(accentizer, omograph_model_size: str = "") -> None:
+    # Report loaded ORT sessions and their active execution providers, so the report shows
+    # exactly which models (and which omograph model) are actually in use this run.
     for model_name in ("omograph_model", "accent_model", "stress_usage_predictor", "yo_homograph_model"):
         model = getattr(accentizer, model_name, None)
         session = getattr(model, "session", None)
+        label = f"{model_name}(model={omograph_model_size})" if model_name == "omograph_model" and omograph_model_size else model_name
         if session is None:
+            # Legitimate only for stress_usage_predictor in tiny_mode; anything else means
+            # the model silently did not load, which the report must not hide.
+            print(f"DSR_PERF:{label}:MISSING", file=sys.stderr, flush=True)
             continue
         # Report actual providers and avoid silently changing session behavior;
         # thread pools are set via environment before ORT import.
-        print(f"DSR_PERF:{model_name}:providers={','.join(session.get_providers())}:cpu_threads={_CPU_THREADS}", file=sys.stderr, flush=True)
+        print(f"DSR_PERF:{label}:providers={','.join(session.get_providers())}:cpu_threads={_CPU_THREADS}", file=sys.stderr, flush=True)
+
+
+def verify_required_models(accentizer) -> None:
+    # omograph_model is what the model picker actually switches; if it is absent the run
+    # would silently fall back to accent-only output (the "identical result" symptom), so
+    # fail loudly instead.
+    missing = [
+        name for name in ("omograph_model", "accent_model", "yo_homograph_model")
+        if getattr(getattr(accentizer, name, None), "session", None) is None
+    ]
+    if missing:
+        raise RuntimeError("RUAccent не загрузил обязательные ONNX-модели: " + ", ".join(missing))
 
 
 def configure_onnx_tokenizer_inputs(accentizer) -> None:
@@ -241,8 +259,82 @@ def configure_onnx_tokenizer_inputs(accentizer) -> None:
 # removes the redundant ONNX runs and tokenizations without changing any output —
 # important on GPU, where every extra run adds launch overhead and keeps the card idle.
 _ACCENT_CACHE_ENABLED = os.environ.get("DSR_ACCENT_CACHE", "1") != "0"
+# A book repeats words but has a bounded vocabulary; the cap keeps a pathological
+# document from growing the cache without limit (past it we simply stop adding).
+_ACCENT_CACHE_LIMIT = max(0, int(os.environ.get("DSR_ACCENT_CACHE_LIMIT", "200000")))
 _ACCENT_CACHE = {}
 _ACCENT_CACHE_HITS = [0]
+
+# RUAccent ships a second, far larger stress dictionary (accents.json.gz, ~3.2M
+# forms) that is skipped in tiny_mode to keep RAM low. When DSR finds polysyllabic
+# words the neural model left unmarked, it streams that file once and keeps only the
+# entries that were asked for, so the worker's memory stays proportional to the
+# review list instead of the dictionary.
+_AUTOSTRESS_DICT_ENABLED = os.environ.get("DSR_AUTOSTRESS_DICT", "1") != "0"
+_FULL_DICT_KNOWN = {}
+
+
+def _full_dictionary_path() -> pathlib.Path:
+    spec = importlib.util.find_spec("ruaccent")
+    if spec is None or spec.origin is None:
+        return pathlib.Path()
+    return pathlib.Path(spec.origin).resolve().parent / "dictionary" / "accents.json.gz"
+
+
+def _dict_key(word: str) -> str:
+    # Mirror RUAccent's own lookup: lower-case and drop accent markers, but keep ё
+    # as-is, because accents.json.gz stores ё spellings verbatim (unlike _normalize,
+    # which folds ё to е for the function-word list).
+    return ACCENT_RE.sub("", word).lower()
+
+
+def resolve_full_dictionary(words):
+    """Return {word: stressed-form-with-plus} for words present in accents.json.gz.
+
+    Only the requested entries are kept, so the 3.2M-entry dictionary never
+    inflates the worker's RSS. Results (including misses) are cached across calls.
+    """
+    result = {}
+    if not _AUTOSTRESS_DICT_ENABLED:
+        return result
+    missing = []
+    for word in words:
+        key = _dict_key(str(word))
+        if key and key not in _FULL_DICT_KNOWN:
+            _FULL_DICT_KNOWN[key] = None
+            missing.append(key)
+    if missing:
+        wanted = set(missing)
+        try:
+            with gzip.open(_full_dictionary_path(), "rt", encoding="utf-8") as stream:
+                for line in stream:
+                    q = line.find('": "')
+                    if q < 0:
+                        continue
+                    key = line[2:q]
+                    if key not in wanted:
+                        continue
+                    value = line[q + 3:].rstrip()
+                    if value.endswith(","):
+                        value = value[:-1]
+                    if value.startswith('"') and value.endswith('"'):
+                        value = value[1:-1]
+                    _FULL_DICT_KNOWN[key] = value
+                    wanted.discard(key)
+                    if not wanted:
+                        break
+        except OSError as exc:
+            _emit(f"DSR_WARN:полный словарь ударений недоступен: {exc}")
+    for word in words:
+        value = _FULL_DICT_KNOWN.get(_dict_key(str(word)))
+        if value:
+            result[str(word)] = value
+    return result
+
+
+def _cache_store(word: str, value: str) -> None:
+    if _ACCENT_CACHE_LIMIT == 0 or len(_ACCENT_CACHE) < _ACCENT_CACHE_LIMIT:
+        _ACCENT_CACHE[word] = value
 
 
 def install_accent_cache(accentizer) -> None:
@@ -259,7 +351,7 @@ def install_accent_cache(accentizer) -> None:
             _ACCENT_CACHE_HITS[0] += 1
             return cached
         result = original(word)
-        _ACCENT_CACHE[word] = result
+        _cache_store(word, result)
         return result
 
     model.put_accent = put_accent_cached
@@ -271,7 +363,21 @@ def install_accent_cache(accentizer) -> None:
 # calls per word length (identical lengths need no padding). Words whose decision is
 # close to the model's thresholds are re-checked individually, so the produced text
 # is identical to the plain one-word-at-a-time result.
-_ACCENT_BATCH_STATS = {"batches": 0, "words": 0, "rechecks": 0}
+_ACCENT_BATCH_STATS = {"batches": 0, "words": 0, "rechecks": 0, "fallbacks": 0}
+
+# The batched path mirrors a few RUAccent internals (the [CLS]/[SEP] slice width,
+# argmax over logits, the 0.55 threshold). A start-up self-test runs the batched path
+# against the library's own one-word path; if they disagree for even one word,
+# batching is switched off and the slower-but-certain path is used.
+_ACCENT_SELFTEST_WORDS = (
+    "теперь новое зубах топливо горстями шагах длинным платок жилам пламенем плечо вела "
+    "одной мама окно дерево человек она они его сегодня вчера работа работает красивая "
+    "быстро медленно хорошо плохо книга книги читаю читаем замок коса начала округа сторожи "
+    "развитая пережитое роженица пристава ожила создало проклята коротки удало волоки "
+    "вывозите выходите железы перепела балчуга вертела воронью бутиках сторожу приставу "
+    "электричество здравствуйте государство путешествие"
+).split()
+_EXPECTED_RUACCENT_VERSION = os.environ.get("DSR_RUACCENT_VERSION", "1.5.8.3")
 
 
 def install_batched_pipeline(accentizer) -> None:
@@ -328,6 +434,40 @@ def install_batched_pipeline(accentizer) -> None:
                 results[index] = model.render_stress(words_in_group[offset], pred)
         return results
 
+    try:
+        import ruaccent as _ruaccent_package
+        installed_version = getattr(_ruaccent_package, "__version__", "")
+    except Exception:
+        installed_version = ""
+    forced = os.environ.get("DSR_PIPELINE_BATCH", "") == "1"
+    if installed_version and installed_version != _EXPECTED_RUACCENT_VERSION and not forced:
+        _emit(
+            "DSR_PERF:accent_batch:disabled (ruaccent {0} != tested {1}; set DSR_PIPELINE_BATCH=1 to force)".format(
+                installed_version, _EXPECTED_RUACCENT_VERSION
+            )
+        )
+        return
+    try:
+        expected = [model.put_accent(word) for word in _ACCENT_SELFTEST_WORDS]
+        produced = _put_accent_batch(list(_ACCENT_SELFTEST_WORDS))
+        mismatches = [(w, e, p) for w, e, p in zip(_ACCENT_SELFTEST_WORDS, expected, produced) if e != p]
+    except Exception as exc:
+        _emit(f"DSR_PERF:accent_batch:disabled (self-test error: {type(exc).__name__}: {exc})")
+        return
+    if mismatches:
+        word, want, got = mismatches[0]
+        _emit(
+            "DSR_PERF:accent_batch:disabled (self-test mismatch {0} of {1}: {2!r} -> {3!r} != {4!r})".format(
+                len(mismatches), len(_ACCENT_SELFTEST_WORDS), word, got, want
+            )
+        )
+        return
+    _emit(
+        "DSR_PERF:accent_batch:enabled (ruaccent {0}, self-test ok, {1} words)".format(
+            installed_version or "unknown", len(_ACCENT_SELFTEST_WORDS)
+        )
+    )
+
     def batched_process_all_internal(text):
         text = re.sub(accentizer.normalize, "", text)
         sentences = _TextPreprocessor.split_by_sentences(text)
@@ -376,7 +516,7 @@ def install_batched_pipeline(accentizer) -> None:
             for word, produced_word, job in zip(pending_words, produced, pending_jobs):
                 container, index, _ = job
                 container[index] = produced_word
-                _ACCENT_CACHE[word] = produced_word
+                _cache_store(word, produced_word)
         assembled = []
         for remaining_text, processed_words in pieces:
             if processed_words is None:
@@ -389,7 +529,10 @@ def install_batched_pipeline(accentizer) -> None:
     def safe_process_all_internal(text):
         try:
             return batched_process_all_internal(text)
-        except Exception:
+        except Exception as exc:
+            _ACCENT_BATCH_STATS["fallbacks"] += 1
+            if _ACCENT_BATCH_STATS["fallbacks"] == 1:
+                _emit(f"WARNING: accent batching failed, using per-word path: {type(exc).__name__}: {exc}")
             return original_internal(text)
 
     accentizer.process_all_internal = safe_process_all_internal
@@ -540,7 +683,8 @@ def main() -> int:
             tiny_mode=True,
         )
         configure_onnx_tokenizer_inputs(accentizer)
-        configure_onnx_performance(accentizer)
+        configure_onnx_performance(accentizer, args.model)
+        verify_required_models(accentizer)
         install_accent_cache(accentizer)
         install_batched_pipeline(accentizer)
         if args.device == "CUDA":
@@ -577,17 +721,40 @@ def main() -> int:
             except Exception as exc:
                 print(json.dumps({"error": str(exc)}, ensure_ascii=False), flush=True)
                 continue
-            response = process_payload(accentizer, executor, payload)
+            if isinstance(payload, dict):
+                # Control request, not text: resolve the words DSR flagged for
+                # review against RUAccent's bundled full stress dictionary.
+                if payload.get("op") == "resolve":
+                    words = payload.get("words")
+                    if not isinstance(words, list):
+                        words = []
+                    response = {
+                        "resolved": resolve_full_dictionary([str(word) for word in words]),
+                        "enabled": _AUTOSTRESS_DICT_ENABLED,
+                    }
+                else:
+                    response = {"error": f"неизвестная операция: {payload.get('op')!r}"}
+            else:
+                response = process_payload(accentizer, executor, payload)
             print(json.dumps(response, ensure_ascii=False), flush=True)
     finally:
         executor.shutdown(wait=False)
     if _ACCENT_CACHE_ENABLED:
         _emit(f"DSR_PERF:accent_cache:entries={len(_ACCENT_CACHE)}:hits={_ACCENT_CACHE_HITS[0]}")
     _emit(
-        "DSR_PERF:accent_batch:batches={0}:words={1}:rechecks={2}".format(
-            _ACCENT_BATCH_STATS["batches"], _ACCENT_BATCH_STATS["words"], _ACCENT_BATCH_STATS["rechecks"]
+        "DSR_PERF:accent_batch:batches={0}:words={1}:rechecks={2}:fallbacks={3}".format(
+            _ACCENT_BATCH_STATS["batches"],
+            _ACCENT_BATCH_STATS["words"],
+            _ACCENT_BATCH_STATS["rechecks"],
+            _ACCENT_BATCH_STATS["fallbacks"],
         )
     )
+    if _AUTOSTRESS_DICT_ENABLED:
+        # "requested" counts every distinct word we looked up (hits and misses); "found" is how
+        # many the dictionary actually knew. The old "entries" label counted both and read as if
+        # the dictionary had filled that many words.
+        found = sum(1 for value in _FULL_DICT_KNOWN.values() if value)
+        _emit(f"DSR_PERF:dictionary_stress:requested={len(_FULL_DICT_KNOWN)}:found={found}")
 
     return 0
 if __name__ == "__main__":

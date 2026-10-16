@@ -105,13 +105,20 @@ internal static class Program
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool CloseHandle(IntPtr handle);
 
+    // CPU времени процесса накапливается как сумма приростов по каждому PID, а не как
+    // абсолютная сумма дерева: при снимке дерева короткоживущий дочерний процесс
+    // (python-воркер) мог завершиться между двумя замерами, и тогда его вклад
+    // полностью пропадал из показаний индикатора.
+    private static readonly Dictionary<int, double> ProcessCpuBaseline = new();
+    private static readonly object ProcessCpuLock = new();
+    private static double ProcessCpuAccumulatedMilliseconds;
+
     internal static (double CpuMilliseconds, long WorkingSetBytes) CurrentProcessTreeUsage()
     {
-        var cpuMilliseconds = 0.0;
-        long workingSetBytes = 0;
+        var samples = new List<(int Id, double CpuMilliseconds, long WorkingSetBytes)>();
         using (var self = Process.GetCurrentProcess())
         {
-            AddProcessUsage(self, ref cpuMilliseconds, ref workingSetBytes);
+            AddProcessUsage(self, samples);
             var children = ReadChildProcessIds();
             var rootId = self.Id;
             var pending = new Queue<int>();
@@ -127,14 +134,31 @@ internal static class Program
                     try
                     {
                         using var child = Process.GetProcessById(childId);
-                        AddProcessUsage(child, ref cpuMilliseconds, ref workingSetBytes);
+                        AddProcessUsage(child, samples);
                     }
                     catch (ArgumentException) { }
                     catch (InvalidOperationException) { }
                 }
             }
         }
-        return (cpuMilliseconds, workingSetBytes);
+        long workingSetBytes = 0;
+        lock (ProcessCpuLock)
+        {
+            var seen = new HashSet<int>();
+            foreach (var sample in samples)
+            {
+                seen.Add(sample.Id);
+                var delta = ProcessCpuBaseline.TryGetValue(sample.Id, out var last)
+                    ? sample.CpuMilliseconds - last
+                    : sample.CpuMilliseconds;
+                if (delta > 0) ProcessCpuAccumulatedMilliseconds += delta;
+                ProcessCpuBaseline[sample.Id] = sample.CpuMilliseconds;
+                workingSetBytes += sample.WorkingSetBytes;
+            }
+            foreach (var staleId in ProcessCpuBaseline.Keys.Where(id => !seen.Contains(id)).ToList())
+                ProcessCpuBaseline.Remove(staleId);
+        }
+        return (ProcessCpuAccumulatedMilliseconds, workingSetBytes);
     }
 
     private static Dictionary<int, List<int>> ReadChildProcessIds()
@@ -159,15 +183,15 @@ internal static class Program
         return children;
     }
 
-    private static void AddProcessUsage(Process process, ref double cpuMilliseconds, ref long workingSetBytes)
+    private static void AddProcessUsage(Process process, List<(int Id, double CpuMilliseconds, long WorkingSetBytes)> samples)
     {
         try
         {
-            cpuMilliseconds += process.TotalProcessorTime.TotalMilliseconds;
-            workingSetBytes += process.WorkingSet64;
+            samples.Add((process.Id, process.TotalProcessorTime.TotalMilliseconds, process.WorkingSet64));
         }
         catch (InvalidOperationException) { }
         catch (System.ComponentModel.Win32Exception) { }
+        catch (ArgumentException) { }
     }
 
     internal static void LogError(string context, Exception exception)
@@ -213,6 +237,7 @@ internal static class Program
         internal int CompletedUnits { get; set; }
         internal int FailedUnits { get; set; }
         internal int UnrecognizedWordCount { get; set; }
+        internal int DictionaryStressCount { get; set; }
         internal long ImagePayloadCharacterCount { get; set; }
         internal double CpuPercent { get; set; }
         internal long PeakWorkingSetBytes { get; set; }
@@ -284,11 +309,60 @@ internal static class Program
                 }
             }
 
+            if (args.Length >= 2 && args[0] == "--review")
+            {
+                // Прямой запуск окна проверки слов: удобно, когда книга уже сконвертирована.
+                try
+                {
+                    var book = args.Length >= 3 ? args[2] : null;
+                    var application = new System.Windows.Application();
+                    application.Run(new WordReviewWindow(args[1], book));
+                    return 0;
+                }
+                catch (Exception ex)
+                {
+                    LogError("Ошибка запуска окна проверки", ex);
+                    System.Windows.MessageBox.Show(ex.Message, "Ошибка запуска окна проверки",
+                        System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Error);
+                    return 1;
+                }
+            }
+
             if (args.Length == 1 && args[0] == "--probe-gpu")
             {
                 var gpu = ProbeGpu();
                 Console.WriteLine(gpu.Message);
                 return gpu.Supported ? 0 : 1;
+            }
+
+            if (args.Length >= 2 && args[0] == "--llm-stress")
+                return RunLlmStressCommand(args[1], ParseLlmEngineArgs(args, 2));
+
+            if (args.Length >= 1 && args[0] == "--llm-benchmark")
+                return RunLlmBenchmarkCommand(ParseLlmEngineArgs(args, 1));
+
+            if (args.Length >= 1 && args[0] == "--llm-remote-models")
+            {
+                var engine = ParseLlmEngineArgs(args, 1);
+                var remote = ListRemoteLlmModels(engine, out var remoteError);
+                if (remoteError.Length > 0) Console.Error.WriteLine(remoteError);
+                Console.WriteLine("Сервис: " + engine.Title);
+                foreach (var name in remote) Console.WriteLine("  " + name);
+                return remote.Count == 0 ? 1 : 0;
+            }
+
+            if (args.Length == 1 && args[0] == "--llm-models")
+            {
+                var available = DiscoverLlmModels();
+                var engine = CurrentLlmEngine();
+                Console.WriteLine("Движок сейчас: " + engine.Title + " (" + engine.Id + ")");
+                Console.WriteLine("Модель по умолчанию: " + DefaultLlmModelFolder);
+                Console.WriteLine("Выбрана сейчас: " + CurrentLlmModel());
+                Console.WriteLine("Найдено локальных моделей: " + available.Count);
+                foreach (var name in available) Console.WriteLine("  " + name + "  (" + LlmModelDirectory(name) + ")");
+                Console.WriteLine("Папка моделей: " + LlmModelsDirectory);
+                Console.WriteLine("Настройки: " + LlmSettingsPath);
+                return 0;
             }
 
             var options = Options.Parse(args);
@@ -666,6 +740,7 @@ internal static class Program
         report.AppendLine($"Обработано фрагментов: {diagnostics.CompletedUnits:N0}/{diagnostics.TotalUnits:N0}");
         report.AppendLine($"Ошибок отдельных фрагментов: {diagnostics.FailedUnits:N0}");
         report.AppendLine($"Нераспознанных слов в отчёте: {diagnostics.UnrecognizedWordCount:N0}");
+        report.AppendLine($"Ударений подставлено из словаря RUAccent: {diagnostics.DictionaryStressCount:N0}");
         report.AppendLine($"Время обработки: {FormatDuration(diagnostics.Elapsed)}");
         report.AppendLine($"Скорость: {(diagnostics.Elapsed.TotalSeconds > 0 ? diagnostics.CharacterCount / diagnostics.Elapsed.TotalSeconds : 0):0.0} символов/с; {(diagnostics.Elapsed.TotalSeconds > 0 ? diagnostics.CompletedUnits / diagnostics.Elapsed.TotalSeconds : 0):0.00} фрагментов/с");
         report.AppendLine($"Пик RAM процесса: {diagnostics.PeakWorkingSetBytes / 1024d / 1024d:0.0} МБ");
@@ -698,6 +773,8 @@ internal static class Program
         var conversionTimer = Stopwatch.StartNew();
         var bytesIn = sourceBytes.LongLength;
         var wordReview = new List<string>();
+        // Polysyllabic words the model left unmarked, de-duplicated by dictionary key.
+        var residueWords = new HashSet<string>(StringComparer.Ordinal);
         using var accentizer = new RuAccentWorker(model, true, device, report);
         accentizer.Start();
         accentizer.EnsureStarted();
@@ -708,6 +785,9 @@ internal static class Program
         var contents = new string[lines.Length];
         var endings = new string[lines.Length];
         var accentedLines = new string?[lines.Length];
+        // Lines that were accented successfully; failed lines are left untouched and
+        // must never receive a dictionary stress mark or reappear in the review.
+        var reviewable = new bool[lines.Length];
         for (var i = 0; i < lines.Length; i++)
         {
             var line = lines[i];
@@ -753,8 +833,10 @@ internal static class Program
                     var modelProcessedWithPunctuation = EnsureOriginalPunctuation(content, modelProcessed);
                     accentedLines[i] = ApplyYoDictionary(modelProcessedWithPunctuation);
                     var reviewCountBefore = wordReview.Count;
-                    CollectUnrecognizedWords(content, accentedLines[i]!, wordReview);
+                    foreach (var word in CollectUnrecognizedWords(content, accentedLines[i]!, wordReview))
+                        residueWords.Add(DictionaryKey(word));
                     diagnostics.UnrecognizedWordCount += CountReviewWords(wordReview.Skip(reviewCountBefore));
+                    reviewable[i] = true;
                 }
                 catch (Exception ex)
                 {
@@ -774,6 +856,24 @@ internal static class Program
             report($"Прогресс {completed}/{lines.Length}; прошло {conversionTimer.Elapsed:hh\\:mm\\:ss}; осталось {(estimatedRemaining.HasValue ? estimatedRemaining.Value.ToString("hh\\:mm\\:ss") : "расчёт…")}");
             LogConversion(inputPath, bytesIn, text.Length, conversionTimer.Elapsed, estimatedRemaining, $"Обработка {completed}/{lines.Length}");
             reportProgress(completed, lines.Length);
+        }
+        // The neural model leaves some polysyllabic words unmarked (rare words,
+        // compounds, names). RUAccent ships a much larger stress dictionary that is
+        // skipped in tiny_mode to save RAM: resolve those words once for the whole
+        // file, add the marks it knows, then rebuild the review so only genuinely
+        // unknown words are left for the manual pass.
+        var dictionaryStress = accentizer.ResolveWords(residueWords.ToArray());
+        if (dictionaryStress.Count > 0)
+        {
+            for (var i = 0; i < accentedLines.Length; i++)
+                if (reviewable[i] && accentedLines[i] != null)
+                    accentedLines[i] = ApplyDictionaryStress(accentedLines[i]!, dictionaryStress);
+            wordReview.Clear();
+            for (var i = 0; i < accentedLines.Length; i++)
+                if (reviewable[i] && accentedLines[i] != null)
+                    CollectUnrecognizedWords(contents[i], accentedLines[i]!, wordReview);
+            diagnostics.DictionaryStressCount = dictionaryStress.Count;
+            report($"Из словаря RUAccent подставлено ударений: {dictionaryStress.Count}.");
         }
         for (var i = 0; i < lines.Length; i++)
         {
@@ -842,19 +942,25 @@ internal static class Program
     internal sealed record DeclensionCorrection(string Lemma, string Form, string Case, string Context);
     internal sealed record WordReviewPatternCorrection(string SourceWord, string Corrected, string? ExcludedContext, int ExcludedOccurrence);
 
-    private static void CollectUnrecognizedWords(string source, string converted, List<string> report)
+    private static List<string> CollectUnrecognizedWords(string source, string converted, List<string> report)
     {
         var sourceMatches = WordTokens.Matches(source).Cast<System.Text.RegularExpressions.Match>().ToArray();
         var outputMatches = WordTokens.Matches(converted).Cast<System.Text.RegularExpressions.Match>().ToArray();
-        if (sourceMatches.Length != outputMatches.Length) return;
+        if (sourceMatches.Length != outputMatches.Length) return new List<string>();
 
         var suspiciousWords = new List<string>();
         for (var i = 0; i < sourceMatches.Length; i++)
         {
             var original = sourceMatches[i].Value;
-            if (NotCyrillicWord.IsMatch(original) || NormalizeWordLetters(original).Length < 2) continue;
             var normalized = NormalizeWordLetters(original);
-            if (!RussianVowel.IsMatch(normalized)) continue;
+            if (NotCyrillicWord.IsMatch(original) || normalized.Length < 2) continue;
+            // RUAccent never marks stress inside a monosyllabic word: its position is
+            // unambiguous, so the absence of a mark there is not a defect. Only words
+            // with two or more vowels can genuinely be missing a required stress mark.
+            if (RussianVowel.Matches(normalized).Count < 2) continue;
+            // Short prepositions/conjunctions/particles are deliberately left unstressed
+            // by ProtectUnstressedWords, so they must not be reported either.
+            if (UnstressedWords.Contains(normalized)) continue;
             var convertedWord = outputMatches[i].Value;
             // Only a combining acute explicitly emitted by the model counts as
             // stress; ë is self-stressed in Russian and excludes the word from review.
@@ -866,6 +972,7 @@ internal static class Program
 
         if (suspiciousWords.Count > 0)
             report.Add($"Фрагмент: {source}{Environment.NewLine}Не распознаны: {string.Join(", ", suspiciousWords.Distinct(StringComparer.OrdinalIgnoreCase))}{Environment.NewLine}");
+        return suspiciousWords;
     }
 
     internal static List<WordReviewEntry> ReadWordReview(string path)
@@ -890,9 +997,12 @@ internal static class Program
                     if (close > 8) structured.Add(new WordReviewEntry(line[8..close], currentContext, line[(close + 3)..]));
                 }
             }
+            // Both the "Не распознаны" and the "Правка [...]" lines describe the same
+            // word in the same fragment, so keep a single entry per (word, fragment):
+            // prefer the "Правка" one, which may carry an already saved correction.
             return AddContextOccurrences(structured
-                .GroupBy(entry => NormalizeWordLetters(entry.Word).ToLowerInvariant(), StringComparer.OrdinalIgnoreCase)
-                .SelectMany(group => group)
+                .GroupBy(entry => NormalizeWordLetters(entry.Word).ToLowerInvariant() + "\u0001" + entry.Context, StringComparer.Ordinal)
+                .Select(group => group.FirstOrDefault(entry => !string.Equals(entry.Proposed, entry.Word, StringComparison.Ordinal)) ?? group.First())
                 .ToList());
         }
         var entries = new List<WordReviewEntry>();
@@ -936,8 +1046,8 @@ internal static class Program
     internal static string FormatWordReview(IEnumerable<WordReviewEntry> entries)
     {
         var list = entries.ToArray();
-        var output = new StringBuilder("Слова для ручной проверки: слова с русскими гласными, в которых после обработки нет явной отметки ударения и нет буквы ё. Такие слова могут быть корректными безударными в записи, неизвестными модели или опечатками; список не утверждает, что каждое слово ошибочно." + Environment.NewLine + Environment.NewLine);
-        if (list.Length == 0) return "Слов без явного ударения и без буквы ё не найдено." + Environment.NewLine;
+        var output = new StringBuilder("Слова для ручной проверки: многосложные слова (два и более слогов) с русскими гласными, в которых после обработки нет явной отметки ударения и нет буквы ё. Односложные слова программа намеренно оставляет без ударения: положение ударения в них однозначно. Такие слова могут быть корректными безударными в записи, неизвестными модели или опечатками; список не утверждает, что каждое слово ошибочно." + Environment.NewLine + Environment.NewLine);
+        if (list.Length == 0) return "Многосложных слов без явного ударения и без буквы ё не найдено." + Environment.NewLine;
         foreach (var group in list.GroupBy(item => SplitReviewContext(item.Context).Context))
         {
             output.AppendLine("Фрагмент: " + group.Key);
@@ -1535,6 +1645,53 @@ internal static class Program
         });
     }
 
+    // Like NormalizeWordLetters, but keeps the ё/е distinction: RUAccent's stress
+    // dictionary stores ё spellings verbatim, so a е/ё mismatch must not match.
+    private static string DictionaryKey(string word)
+    {
+        var builder = new StringBuilder(word.Length);
+        foreach (var ch in word)
+        {
+            if (System.Globalization.CharUnicodeInfo.GetUnicodeCategory(ch) == System.Globalization.UnicodeCategory.NonSpacingMark)
+                continue;
+            builder.Append(char.ToLowerInvariant(ch));
+        }
+        return builder.ToString();
+    }
+
+    // Adds a stress mark to words the neural model left unmarked, using RUAccent's
+    // full stress dictionary (accents.json.gz). Every dictionary entry is the same
+    // word with a single '+' before the stressed vowel, so applying a match only
+    // ever adds a mark — never changes letters. Capitalisation is restored from the
+    // source token, and ё words are skipped because ё already carries the stress.
+    private static string ApplyDictionaryStress(string text, IReadOnlyDictionary<string, string> dictionary)
+    {
+        if (dictionary.Count == 0 || string.IsNullOrEmpty(text)) return text;
+        return WordTokens.Replace(text, match =>
+        {
+            var word = match.Value;
+            if (word.IndexOf('\u0301') >= 0 || word.IndexOf('ё') >= 0 || word.IndexOf('Ё') >= 0) return word;
+            if (!dictionary.TryGetValue(DictionaryKey(word), out var stressed)) return word;
+            var replacement = stressed.Replace("+", "\u0301");
+            if (word.All(ch => !char.IsLetter(ch) || char.IsUpper(ch)))
+                return replacement.ToUpperInvariant();
+            if (char.IsUpper(word[0])) return UppercaseFirstLetter(replacement);
+            return replacement;
+        });
+    }
+
+    // Uppercases the first letter, skipping a leading stress mark (U+0301), so a
+    // dictionary form like "+яхонтовым" becomes "Я́хонтовым" rather than "я́хонтовым".
+    private static string UppercaseFirstLetter(string text)
+    {
+        for (var i = 0; i < text.Length; i++)
+        {
+            if (!char.IsLetter(text[i])) continue;
+            return text[..i] + char.ToUpperInvariant(text[i]) + text[(i + 1)..];
+        }
+        return text;
+    }
+
     private static int CountReviewWords(IEnumerable<string> entries)
     {
         var count = 0;
@@ -1554,7 +1711,7 @@ internal static class Program
         foreach (var block in review)
         {
             var contextPrefix = "Фрагмент: ";
-            var unknownPrefix = "Подозрительные ударения: ";
+            var unknownPrefix = "Не распознаны: ";
             var contextStart = block.IndexOf(contextPrefix, StringComparison.Ordinal);
             var unknownStart = block.IndexOf(unknownPrefix, StringComparison.Ordinal);
             if (contextStart < 0 || unknownStart < 0) continue;
@@ -1564,6 +1721,960 @@ internal static class Program
             entries.AddRange(words.Select(word => new WordReviewEntry(word, context, word)));
         }
         File.WriteAllText(reportPath, FormatWordReview(entries), new UTF8Encoding(true));
+    }
+
+    // --- Локальный ИИ-проход по контексту -------------------------------------------------
+    // Слова, которые нейромодель RUAccent оставила без ударения (редкие, диалектные,
+    // устаревшие, имена), уточняются локальной языковой моделью на этом же компьютере.
+    // Проход идёт отдельным процессом Python: onnxruntime-genai тянет своё CUDA-окружение
+    // и не должен конфликтовать с сессиями RUAccent в основном процессе.
+    // Результат — только подсказки: они показываются в окне проверки и применяются
+    // пользователем вручную.
+
+    internal const int LlmBatchSize = 8;
+    internal const string DefaultLlmModelFolder = "Qwen2.5-3B-Instruct-onnx";
+    internal const string LlmGenaiConfigName = "genai_config.json";
+
+    // Контрольные слова для теста движка: ударение каждого сверено с полным словарём ударений
+    // RUAccent (accents.json.gz). Тест отвечает на вопрос «какой движок стоит выбрать на этом
+    // компьютере»: он показывает и скорость, и число верных ударений. Контекст — обычное
+    // предложение со словом: в книге слово тоже приходит с контекстом, иначе задача не та.
+    internal static readonly (string Word, int Stress, string Context)[] LlmBenchmarkWords =
+    {
+        ("договор", 5, "Мы подписали договор вчера вечером."),
+        ("звонит", 4, "Он звонит мне каждый вечер."),
+        ("каталог", 5, "Библиотекарь открыл каталог и нашёл нужную книгу."),
+        ("квартал", 5, "Мы переехали в новый квартал."),
+        ("красивее", 4, "Этот сад красивее прежнего."),
+        ("банты", 1, "Она завязала банты и вышла на улицу."),
+        ("торты", 1, "Мама испекла торты к празднику."),
+        ("жалюзи", 5, "Он опустил жалюзи и включил свет."),
+        ("щавель", 3, "Бабушка принесла щавель с огорода."),
+        ("баловать", 5, "Не надо баловать детей сладостями."),
+        ("ходатайство", 3, "Адвокат подал ходатайство в суд."),
+        ("обеспечение", 5, "Отец отвечает за обеспечение семьи."),
+        ("украинский", 4, "Он выучил украинский язык за год."),
+        ("бухгалтер", 4, "Бухгалтер посчитал расходы за месяц."),
+        ("мизерный", 1, "Он получил мизерный оклад."),
+        ("вероисповедание", 9, "В анкете спрашивают вероисповедание."),
+        ("нефтепровод", 9, "Через степь проложили нефтепровод."),
+        ("туфля", 1, "Одна туфля куда-то пропала."),
+        ("средство", 2, "Это средство хорошо помогает от кашля."),
+        ("диспансер", 7, "Он пошёл в диспансер на проверку."),
+        ("феномен", 3, "Этот феномен изучают уже сто лет."),
+        ("гастрономия", 7, "Она любит французскую гастрономию."),
+        ("цемент", 3, "Рабочие привезли цемент и песок."),
+        // И простые слова: так видно и базовую работу модели, и провалы на редких словах.
+        ("молоко", 5, "Он выпил молоко утром."),
+        ("собака", 3, "Собака громко лаяла во дворе."),
+        ("человек", 5, "Этот человек пришёл первым."),
+        ("работа", 3, "Работа заняла весь день."),
+        ("деревня", 3, "Деревня стоит у самой реки."),
+        ("окно", 3, "Он открыл окно и впустил свежий воздух."),
+        ("книга", 2, "Книга лежала на столе."),
+        ("ворона", 3, "Ворона села на забор."),
+    };
+
+    // Знак ударения ставится после ударной гласной — так же, как в подсказках ИИ и в окне проверки.
+    internal static string StressMarked(string word, int vowelIndex) =>
+        word[..(vowelIndex + 1)] + "\u0301" + word[(vowelIndex + 1)..];
+
+    internal static string LlmModelsDirectory => Path.Combine(ModelCacheDirectory, "llm");
+    internal static string LlmSettingsPath => Path.Combine(DataDirectory, "llm-настройки.json");
+    internal static string LlmSuggestionsPath => Path.Combine(DataDirectory, "llm-подсказки.json");
+
+    // Папка выбранной модели. В настройках хранится либо имя папки внутри ресурсы\модели\llm,
+    // либо полный путь — тогда модель можно держать где угодно.
+    internal static string LlmModelDirectory(string model) =>
+        Path.IsPathRooted(model) ? model : Path.Combine(LlmModelsDirectory, model);
+
+    // --- Способы получить подсказки: своя модель на диске, сервер Ollama или внешний API ---
+    // Сервис с OpenAI-совместимым интерфейсом (OpenAI, OpenRouter, LM Studio, llama.cpp, vLLM)
+    // подключается одинаково: адрес, ключ, имя модели. Модели без цензуры тоже подходят — это
+    // просто другая модель у того же сервиса, особых настроек для них не требуется.
+    internal sealed record LlmEngine(string Provider, string LocalModel, string RemoteModel, string BaseUrl, string ApiKey)
+    {
+        public const string Local = "local";
+        public const string Ollama = "ollama";
+        public const string OpenAi = "openai";
+
+        public bool IsLocal => Provider is not (Ollama or OpenAi);
+
+        // Имя движка для кэша подсказок и для журнала. Ключ внешнего сервиса сюда не попадает.
+        public string Id => Provider switch
+        {
+            Ollama => "ollama#" + RemoteModel,
+            OpenAi => "api#" + HostOf(BaseUrl) + "#" + RemoteModel,
+            _ => LocalModel,
+        };
+
+        public string Title => Provider switch
+        {
+            Ollama => string.IsNullOrWhiteSpace(RemoteModel) ? $"Ollama ({BaseUrl})" : $"Ollama ({RemoteModel})",
+            OpenAi => string.IsNullOrWhiteSpace(RemoteModel)
+                ? $"внешний API ({BaseUrl})"
+                : $"внешний API ({RemoteModel}, {BaseUrl})",
+            _ => LocalModel,
+        };
+
+        public static LlmEngine FromSettings(LlmSettings settings, string localModel)
+        {
+            var provider = (settings.Provider ?? Local).ToLowerInvariant();
+            return new LlmEngine(
+                provider,
+                localModel,
+                provider == Ollama ? settings.OllamaModel : settings.ApiModel,
+                provider == Ollama ? settings.OllamaUrl : settings.ApiUrl,
+                provider == OpenAi ? settings.ApiKey : "");
+        }
+
+        private static string HostOf(string url)
+        {
+            try
+            {
+                var parsed = new Uri(url);
+                return parsed.Host + parsed.AbsolutePath.TrimEnd('/');
+            }
+            catch (UriFormatException)
+            {
+                return url;
+            }
+        }
+    }
+
+    // Настройки ИИ сохраняются в ресурсы\llm-настройки.json. Ключ внешнего сервиса лежит там же
+    // в открытом виде: файл не стоит никому передавать, а вместо него можно задать переменную
+    // окружения DSR_LLM_API_KEY.
+    internal sealed record LlmSettings
+    {
+        public string Provider { get; init; } = LlmEngine.Local;
+        public string Model { get; init; } = "";
+        public string OllamaUrl { get; init; } = "http://127.0.0.1:11434";
+        public string OllamaModel { get; init; } = "";
+        public string ApiUrl { get; init; } = "https://api.openai.com/v1";
+        public string ApiModel { get; init; } = "";
+        public string ApiKey { get; init; } = "";
+        // Искать ли подсказку у других движков, прежде чем спрашивать выбранный.
+        public bool ReuseOtherEngines { get; init; } = true;
+        public Dictionary<string, LlmBenchmark>? Benchmarks { get; init; }
+    }
+
+    internal sealed record LlmBenchmark(string Engine, string Title, int Correct, int Total, double Seconds, string When);
+
+    private static readonly JsonSerializerOptions LlmJsonOptions = new()
+    {
+        WriteIndented = true,
+        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+    };
+
+    // Готовыми моделями считаются все папки рядом с программой, в которых есть genai_config.json:
+    // чтобы добавить новую, достаточно положить её в ресурсы\модели\llm — она сразу появится в списке.
+    internal static List<string> DiscoverLlmModels()
+    {
+        var models = new List<string>();
+        try
+        {
+            if (Directory.Exists(LlmModelsDirectory))
+                foreach (var directory in Directory.EnumerateDirectories(LlmModelsDirectory))
+                    if (File.Exists(Path.Combine(directory, LlmGenaiConfigName)))
+                        models.Add(Path.GetFileName(directory));
+        }
+        catch (Exception error)
+        {
+            LogError("Поиск моделей ИИ", error);
+        }
+        models.Sort(StringComparer.OrdinalIgnoreCase);
+        return models;
+    }
+
+    internal static LlmSettings LoadLlmSettings()
+    {
+        try
+        {
+            if (File.Exists(LlmSettingsPath))
+            {
+                var loaded = JsonSerializer.Deserialize<LlmSettings>(File.ReadAllText(LlmSettingsPath, Encoding.UTF8));
+                if (loaded != null)
+                    return loaded.Benchmarks == null
+                        ? loaded with { Benchmarks = new Dictionary<string, LlmBenchmark>(StringComparer.Ordinal) }
+                        : loaded;
+            }
+        }
+        catch (Exception error)
+        {
+            LogError("Чтение настроек ИИ", error);
+        }
+        return new LlmSettings
+        {
+            Model = DefaultLlmModelFolder,
+            Benchmarks = new Dictionary<string, LlmBenchmark>(StringComparer.Ordinal),
+        };
+    }
+
+    internal static void SaveLlmSettings(LlmSettings settings)
+    {
+        try
+        {
+            Directory.CreateDirectory(DataDirectory);
+            File.WriteAllText(LlmSettingsPath,
+                JsonSerializer.Serialize(settings, LlmJsonOptions), new UTF8Encoding(false));
+        }
+        catch (Exception error)
+        {
+            LogError("Запись настроек ИИ", error);
+        }
+    }
+
+    // Движок из настроек: его используют и окно проверки, и командная строка.
+    internal static LlmEngine CurrentLlmEngine() => LlmEngine.FromSettings(LoadLlmSettings(), CurrentLlmModel());
+
+    // Выбранные в окне настройки: удобно собрать их одной строкой и сохранить.
+    internal static void SaveLlmSettings(string provider, string localModel, string ollamaUrl, string ollamaModel,
+        string apiUrl, string apiModel, string apiKey, bool reuseOtherEngines)
+    {
+        var benchmarks = LoadLlmSettings().Benchmarks ?? new Dictionary<string, LlmBenchmark>(StringComparer.Ordinal);
+        SaveLlmSettings(new LlmSettings
+        {
+            Provider = provider,
+            Model = localModel,
+            OllamaUrl = ollamaUrl,
+            OllamaModel = ollamaModel,
+            ApiUrl = apiUrl,
+            ApiModel = apiModel,
+            ApiKey = apiKey,
+            ReuseOtherEngines = reuseOtherEngines,
+            Benchmarks = benchmarks,
+        });
+    }
+
+    internal static void SaveLlmBenchmark(LlmBenchmarkResult result)
+    {
+        if (!result.Ok) return;
+        var settings = LoadLlmSettings();
+        var benchmarks = new Dictionary<string, LlmBenchmark>(
+            settings.Benchmarks ?? new Dictionary<string, LlmBenchmark>(StringComparer.Ordinal), StringComparer.Ordinal)
+        {
+            [result.EngineId] = new LlmBenchmark(result.EngineId, result.Title, result.Correct, result.Total,
+                result.Seconds, DateTime.Now.ToString("yyyy-MM-dd HH:mm")),
+        };
+        SaveLlmSettings(settings with { Benchmarks = benchmarks });
+    }
+
+    // Выбранная модель: сохранённый выбор, если такая папка на месте, иначе модель по умолчанию,
+    // иначе первая найденная.
+    internal static string CurrentLlmModel()
+    {
+        var saved = LoadLlmSettings().Model;
+        if (!string.IsNullOrWhiteSpace(saved) && File.Exists(Path.Combine(LlmModelDirectory(saved), LlmGenaiConfigName)))
+            return saved;
+        var available = DiscoverLlmModels();
+        var preferred = available.FirstOrDefault(name =>
+            string.Equals(name, DefaultLlmModelFolder, StringComparison.OrdinalIgnoreCase));
+        return preferred ?? available.FirstOrDefault() ?? DefaultLlmModelFolder;
+    }
+
+    internal sealed record LlmStressItem(string Word, IReadOnlyList<string> Contexts);
+
+    // Ответ модели, который не удалось принять как правку: сырой ответ и причина отказа.
+    internal sealed record LlmRejected(string Raw, string Reason);
+
+    internal sealed record LlmStressOutcome(
+        bool Ok, string Message, string Device, double Seconds, int Answered, int Items,
+        Dictionary<string, string> Suggestions, Dictionary<string, LlmRejected> Rejected)
+    {
+        public static LlmStressOutcome Fail(string message, int items) =>
+            new(false, message, "", 0, 0, items,
+                new Dictionary<string, string>(StringComparer.Ordinal),
+                new Dictionary<string, LlmRejected>(StringComparer.Ordinal));
+    }
+
+    // Кэш подсказок: ключ — модель, имя книги и слово, значение — слово со знаком ударения.
+    // Кэш экономит самый дорогой шаг (загрузка модели и генерация) при повторных прогонах
+    // той же книги и хранится рядом с пользовательским словарём. Модель входит в ключ, чтобы
+    // ответы одной модели не подменяли ответы другой при переключении.
+    internal static Dictionary<string, string> LoadLlmSuggestions()
+    {
+        var empty = new Dictionary<string, string>(StringComparer.Ordinal);
+        try
+        {
+            if (!File.Exists(LlmSuggestionsPath)) return empty;
+            var loaded = JsonSerializer.Deserialize<Dictionary<string, string>>(
+                File.ReadAllText(LlmSuggestionsPath, Encoding.UTF8));
+            if (loaded == null) return empty;
+            var result = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (var pair in loaded) result[MigrateLlmKey(pair.Key)] = pair.Value;
+            return result;
+        }
+        catch (Exception error)
+        {
+            LogError("Чтение кэша ИИ-подсказок", error);
+            return empty;
+        }
+    }
+
+    internal static void SaveLlmSuggestions(Dictionary<string, string> suggestions)
+    {
+        try
+        {
+            Directory.CreateDirectory(DataDirectory);
+            File.WriteAllText(LlmSuggestionsPath,
+                JsonSerializer.Serialize(suggestions, LlmJsonOptions), new UTF8Encoding(false));
+        }
+        catch (Exception error)
+        {
+            LogError("Запись кэша ИИ-подсказок", error);
+        }
+    }
+
+    internal static string LlmCacheKey(string model, string book, string word) =>
+        (model + "|" + LlmBookName(book) + "|" + word).ToLowerInvariant();
+
+    // Ключи прежних версий не содержали модель: их ответы получены моделью по умолчанию,
+    // поэтому при чтении старых файлов дописываем её имя, чтобы кэш не терялся.
+    private static string MigrateLlmKey(string key) =>
+        key.Count(character => character == '|') == 1
+            ? DefaultLlmModelFolder.ToLowerInvariant() + "|" + key
+            : key;
+
+    // Готовая подсказка по этому слову, найденная у любой модели. Нужна при переключении
+    // моделей: слова, которые уже разобрала прежняя модель, повторно не отправляются —
+    // иначе каждая смена модели стоила бы полного прогона по всей книге.
+    internal static string? FindAnyLlmSuggestion(Dictionary<string, string> suggestions, string book, string word)
+    {
+        var suffix = "|" + LlmBookName(book).ToLowerInvariant() + "|" + word.ToLowerInvariant();
+        foreach (var pair in suggestions)
+            if (pair.Key.EndsWith(suffix, StringComparison.Ordinal))
+                return pair.Value;
+        return null;
+    }
+
+    // Имя книги одинаково для файла-книги и для отчёта «…_проверка-слов.txt», чтобы кэш
+    // подсказок совпадал при запуске из окна и из командной строки.
+    internal static string LlmBookName(string path)
+    {
+        var name = Path.GetFileNameWithoutExtension(path);
+        const string reviewSuffix = "_проверка-слов";
+        return name.EndsWith(reviewSuffix, StringComparison.OrdinalIgnoreCase)
+            ? name[..^reviewSuffix.Length]
+            : name;
+    }
+
+    internal static LlmStressOutcome RunLlmStressCheck(IReadOnlyList<LlmStressItem> items, string book,
+        Action<string> report, CancellationToken token, LlmEngine? engine = null, bool benchmark = false)
+    {
+        if (items.Count == 0)
+            return new LlmStressOutcome(true, "Нет слов для проверки.", "", 0, 0, 0,
+                new Dictionary<string, string>(StringComparer.Ordinal),
+                new Dictionary<string, LlmRejected>(StringComparer.Ordinal));
+        var chosen = engine ?? CurrentLlmEngine();
+        var modelDirectory = LlmModelDirectory(chosen.LocalModel);
+        if (chosen.IsLocal && (string.IsNullOrWhiteSpace(chosen.LocalModel)
+                || !File.Exists(Path.Combine(modelDirectory, LlmGenaiConfigName))))
+            return LlmStressOutcome.Fail(
+                "Не найдена выбранная модель ИИ: " + (string.IsNullOrWhiteSpace(chosen.LocalModel) ? "(не выбрана)" : chosen.LocalModel) +
+                Environment.NewLine + "Ожидается папка:" + Environment.NewLine + modelDirectory +
+                Environment.NewLine + Environment.NewLine +
+                "Модель скачивается один раз командой:" + Environment.NewLine +
+                "python -c \"from huggingface_hub import snapshot_download; " +
+                "snapshot_download('elbruno/Qwen2.5-3B-Instruct-onnx', local_dir=r'" + modelDirectory + "')\"",
+                items.Count);
+        if (!chosen.IsLocal && (string.IsNullOrWhiteSpace(chosen.BaseUrl) || string.IsNullOrWhiteSpace(chosen.RemoteModel)))
+            return LlmStressOutcome.Fail(
+                chosen.Provider == LlmEngine.Ollama
+                    ? "Не выбран сервер Ollama или модель. Укажите адрес (обычно http://127.0.0.1:11434) " +
+                      "и имя загруженной модели, например qwen2.5:7b."
+                    : "Не указан адрес сервиса или имя модели. Адрес нужен вместе с версией, " +
+                      "например https://api.openai.com/v1.",
+                items.Count);
+
+        string script;
+        string python;
+        try
+        {
+            script = ExtractEmbeddedFile("DSR.llm_stress_worker.py", "llm_stress_worker.py");
+            python = EnsurePythonRuntime();
+        }
+        catch (Exception error)
+        {
+            LogError("Подготовка ИИ-прохода", error);
+            return LlmStressOutcome.Fail(error.Message, items.Count);
+        }
+
+        var work = Path.Combine(DataDirectory, "временные-файлы");
+        Directory.CreateDirectory(work);
+        var requestPath = Path.Combine(work, "llm-запрос.json");
+        var responsePath = Path.Combine(work, "llm-ответ.json");
+        try
+        {
+            if (File.Exists(responsePath)) File.Delete(responsePath);
+            var payload = new
+            {
+                book = new { title = Path.GetFileNameWithoutExtension(book), author = "" },
+                words = items.Select(item => new { word = item.Word, contexts = item.Contexts.ToArray() }).ToArray(),
+            };
+            File.WriteAllText(requestPath, JsonSerializer.Serialize(payload, LlmJsonOptions), new UTF8Encoding(false));
+        }
+        catch (Exception error)
+        {
+            LogError("Запись запроса для ИИ", error);
+            return LlmStressOutcome.Fail("Не удалось подготовить запрос к ИИ: " + error.Message, items.Count);
+        }
+
+        var start = new ProcessStartInfo(python)
+        {
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+            StandardOutputEncoding = new UTF8Encoding(false),
+            StandardErrorEncoding = new UTF8Encoding(false),
+        };
+        start.Environment["PYTHONUTF8"] = "1";
+        ConfigureResourceEnvironment(start);
+        var arguments = new List<string>
+        {
+            "-u", script,
+            "--in", requestPath,
+            "--out", responsePath,
+            "--batch", LlmBatchSize.ToString(System.Globalization.CultureInfo.InvariantCulture),
+        };
+        if (chosen.IsLocal)
+        {
+            arguments.Add("--model");
+            arguments.Add(modelDirectory);
+        }
+        else
+        {
+            arguments.Add("--provider");
+            arguments.Add(chosen.Provider);
+            arguments.Add("--base-url");
+            arguments.Add(chosen.BaseUrl);
+            arguments.Add("--remote-model");
+            arguments.Add(chosen.RemoteModel);
+            if (!string.IsNullOrWhiteSpace(chosen.ApiKey))
+                start.Environment["DSR_LLM_API_KEY"] = chosen.ApiKey;
+        }
+        foreach (var argument in arguments) start.ArgumentList.Add(argument);
+
+        var errors = new StringBuilder();
+        Process process;
+        try
+        {
+            process = System.Diagnostics.Process.Start(start)
+                ?? throw new InvalidOperationException("Не удалось запустить процесс ИИ.");
+        }
+        catch (Exception error)
+        {
+            LogError("Запуск ИИ-прохода", error);
+            return LlmStressOutcome.Fail("Не удалось запустить ИИ-проход: " + error.Message, items.Count);
+        }
+
+        void Handle(string? line)
+        {
+            if (line == null) return;
+            var data = TrimProtocolLine(line);
+            if (!data.StartsWith("DSR_LLM:", StringComparison.Ordinal))
+            {
+                if (data.Length > 0) lock (errors) errors.AppendLine(data);
+                return;
+            }
+            foreach (var message in TranslateLlmProgress(data["DSR_LLM:".Length..]))
+                report(message);
+        }
+
+        process.OutputDataReceived += (_, e) => Handle(e.Data);
+        process.ErrorDataReceived += (_, e) => Handle(e.Data);
+        process.BeginOutputReadLine();
+        process.BeginErrorReadLine();
+
+        using (process)
+        {
+            try
+            {
+                while (!process.WaitForExit(300))
+                {
+                    if (!token.IsCancellationRequested) continue;
+                    try { process.Kill(true); } catch { /* процесс уже завершился */ }
+                    return LlmStressOutcome.Fail("ИИ-проход отменён.", items.Count);
+                }
+                process.WaitForExit();
+            }
+            catch (Exception error)
+            {
+                LogError("Ожидание ИИ-прохода", error);
+                return LlmStressOutcome.Fail("Ошибка ИИ-прохода: " + error.Message, items.Count);
+            }
+        }
+
+        if (!File.Exists(responsePath))
+            return LlmStressOutcome.Fail(
+                "ИИ-проход завершился без ответа." + Environment.NewLine + errors.ToString().Trim(), items.Count);
+
+        try
+        {
+            using var document = JsonDocument.Parse(File.ReadAllText(responsePath, Encoding.UTF8));
+            var root = document.RootElement;
+            if (root.TryGetProperty("error", out var errorElement) && errorElement.ValueKind == JsonValueKind.String)
+                return LlmStressOutcome.Fail(errorElement.GetString() ?? "Ошибка ИИ-прохода", items.Count);
+
+            var suggestions = new Dictionary<string, string>(StringComparer.Ordinal);
+            var rejected = new Dictionary<string, LlmRejected>(StringComparer.Ordinal);
+            var rows = new StringBuilder();
+            var answered = 0;
+            if (root.TryGetProperty("results", out var results) && results.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var item in results.EnumerateArray())
+                {
+                    var word = item.TryGetProperty("word", out var wordElement) && wordElement.ValueKind == JsonValueKind.String
+                        ? wordElement.GetString() : null;
+                    if (string.IsNullOrEmpty(word)) continue;
+                    var suggestion = item.TryGetProperty("suggestion", out var suggestionElement) && suggestionElement.ValueKind == JsonValueKind.String
+                        ? suggestionElement.GetString() : null;
+                    var raw = item.TryGetProperty("raw", out var rawElement) && rawElement.ValueKind == JsonValueKind.String
+                        ? rawElement.GetString() : null;
+                    var reason = item.TryGetProperty("source", out var sourceElement) && sourceElement.ValueKind == JsonValueKind.String
+                        ? sourceElement.GetString() ?? "" : "";
+                    // Ответ принимается только если он проходит ту же проверку, что и правка,
+                    // введённая человеком: те же буквы и ровно один знак ударения.
+                    if (!string.IsNullOrEmpty(suggestion) && IsValidCorrection(word, suggestion))
+                    {
+                        suggestions[word] = suggestion;
+                        answered++;
+                        rows.AppendLine($"принято\t{word}\t{suggestion}\t{(string.IsNullOrEmpty(reason) ? "model" : reason)}");
+                    }
+                    else
+                    {
+                        // Сюда попадают все слова без готового ответа — и те, где модель ответила
+                        // не тем словом, и те, где ответа не было вовсе: их надо показать честно.
+                        if (!string.IsNullOrEmpty(suggestion))
+                            rejected[word] = new LlmRejected(suggestion, "ответ не похож на исходное слово");
+                        else
+                            rejected[word] = new LlmRejected(raw ?? "", string.IsNullOrEmpty(reason) ? "none" : reason);
+                        rows.AppendLine($"отклонено\t{word}\t{raw ?? ""}\t{(string.IsNullOrEmpty(reason) ? "нет ответа" : reason)}\t{suggestion ?? ""}");
+                    }
+                }
+            }
+
+            var device = "";
+            var seconds = 0d;
+            if (root.TryGetProperty("stats", out var stats) && stats.ValueKind == JsonValueKind.Object)
+            {
+                if (stats.TryGetProperty("device", out var deviceElement) && deviceElement.ValueKind == JsonValueKind.String)
+                    device = deviceElement.GetString() ?? "";
+                if (stats.TryGetProperty("seconds", out var secondsElement) && secondsElement.ValueKind == JsonValueKind.Number)
+                    seconds = secondsElement.GetDouble();
+            }
+            var outcome = new LlmStressOutcome(true, "", device, seconds, answered, items.Count, suggestions, rejected);
+            if (!benchmark) WriteLlmLog(items, outcome, rows, errors, chosen);
+            return outcome;
+        }
+        catch (Exception error)
+        {
+            LogError("Чтение ответа ИИ", error);
+            return LlmStressOutcome.Fail("Не удалось разобрать ответ ИИ: " + error.Message, items.Count);
+        }
+    }
+
+    internal static string LlmLogPath => Path.Combine(DataDirectory, "DSR-ии-проверка.log");
+
+    // Слова, по которым модель уже не смогла дать ответ. Генерация идёт без случайности
+    // (greedy) и повторный проход по одному слову даёт тот же результат, поэтому такие
+    // слова больше не отправляются — иначе каждая проверка снова занимала бы минуты.
+    internal static string LlmFailuresPath => Path.Combine(DataDirectory, "llm-без-ответа.json");
+
+    internal sealed record LlmFailure(string Word, string Raw, string Reason);
+
+    internal static Dictionary<string, LlmFailure> LoadLlmFailures()
+    {
+        var empty = new Dictionary<string, LlmFailure>(StringComparer.Ordinal);
+        try
+        {
+            if (!File.Exists(LlmFailuresPath)) return empty;
+            var loaded = JsonSerializer.Deserialize<Dictionary<string, LlmFailure>>(
+                File.ReadAllText(LlmFailuresPath, Encoding.UTF8));
+            if (loaded == null) return empty;
+            var result = new Dictionary<string, LlmFailure>(StringComparer.Ordinal);
+            foreach (var pair in loaded) result[MigrateLlmKey(pair.Key)] = pair.Value;
+            return result;
+        }
+        catch (Exception error)
+        {
+            LogError("Чтение списка слов без ответа ИИ", error);
+            return empty;
+        }
+    }
+
+    internal static void SaveLlmFailures(Dictionary<string, LlmFailure> failures)
+    {
+        try
+        {
+            Directory.CreateDirectory(DataDirectory);
+            File.WriteAllText(LlmFailuresPath,
+                JsonSerializer.Serialize(failures, LlmJsonOptions), new UTF8Encoding(false));
+        }
+        catch (Exception error)
+        {
+            LogError("Запись списка слов без ответа ИИ", error);
+        }
+    }
+
+    // Подробный журнал последнего ИИ-прохода: что спросили, что ответила модель, что принято.
+    // Нужен, когда модель ответила, но подсказок не появилось.
+    private static void WriteLlmLog(IReadOnlyList<LlmStressItem> items, LlmStressOutcome outcome,
+        StringBuilder rows, StringBuilder errors, LlmEngine engine)
+    {
+        try
+        {
+            Directory.CreateDirectory(DataDirectory);
+            var logged = new HashSet<string>(
+                rows.ToString().Split('\n').Select(line => line.Split('\t')).Where(parts => parts.Length > 1)
+                    .Select(parts => parts[1]), StringComparer.Ordinal);
+            var text = new StringBuilder();
+            text.AppendLine("ИИ-проверка ударений, " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
+            text.AppendLine("Движок: " + engine.Title + (engine.IsLocal ? " (" + LlmModelDirectory(engine.LocalModel) + ")" : ""));
+            text.AppendLine($"Отправлено слов: {items.Count}; принято: {outcome.Answered}; отклонено: {outcome.Rejected.Count}.");
+            text.AppendLine($"Вычисления: {outcome.Device}; время: {outcome.Seconds:0} с.");
+            text.AppendLine("Строки: итог, слово, что ответила модель, причина.");
+            text.Append(rows);
+            foreach (var item in items)
+            {
+                if (logged.Contains(item.Word)) continue;
+                text.AppendLine($"без ответа\t{item.Word}\t\tнет строки в ответе модели");
+            }
+            var errorText = errors.ToString().Trim();
+            if (errorText.Length > 0)
+            {
+                text.AppendLine();
+                text.AppendLine("Вывод воркера:");
+                foreach (var line in errorText.Split('\n').TakeLast(20)) text.AppendLine(line.TrimEnd());
+            }
+            File.WriteAllText(LlmLogPath, text.ToString(), new UTF8Encoding(false));
+        }
+        catch (Exception error)
+        {
+            LogError("Запись журнала ИИ-проверки", error);
+        }
+    }
+
+    // Режим командной строки: прогон ИИ-подсказок по готовому отчёту «…_проверка-слов.txt»
+    // без запуска интерфейса. Удобен для длинных книг и для проверки самого механизма.
+    // Движок берётся из настроек, если не указан явно ключами --llm-provider/--llm-model/--llm-url.
+    private static int RunLlmStressCommand(string reviewPath, LlmEngine engine)
+    {
+        if (!File.Exists(reviewPath))
+        {
+            Console.Error.WriteLine("Файл отчёта не найден: " + reviewPath);
+            return 1;
+        }
+
+        Console.WriteLine("Движок: " + engine.Title);
+
+        List<WordReviewEntry> entries;
+        try
+        {
+            entries = ReadWordReview(reviewPath);
+        }
+        catch (Exception error)
+        {
+            LogError("Чтение отчёта для ИИ-проверки", error);
+            Console.Error.WriteLine("Не удалось прочитать отчёт: " + error.Message);
+            return 1;
+        }
+
+        if (entries.Count == 0)
+        {
+            Console.WriteLine("В отчёте нет слов для проверки.");
+            return 0;
+        }
+
+        var groups = entries
+            .GroupBy(entry => entry.Word.Normalize(NormalizationForm.FormC).ToLowerInvariant(), StringComparer.Ordinal)
+            .ToList();
+        var items = groups
+            .Select(group => new LlmStressItem(group.First().Word,
+                group.Select(entry => entry.Context).Where(context => !string.IsNullOrWhiteSpace(context))
+                    .Distinct().Take(2).ToArray()))
+            .ToList();
+
+        var settings = LoadLlmSettings();
+        var failures = LoadLlmFailures();
+        var cached = LoadLlmSuggestions();
+        var pending = items.Where(item =>
+        {
+            var key = LlmCacheKey(engine.Id, reviewPath, item.Word);
+            if (failures.ContainsKey(key)) return false;
+            // Свой прежний ответ повторно не спрашиваем: ответ того же движка не изменится.
+            if (cached.ContainsKey(key)) return false;
+            // Чужой ответ принимаем, пока включена галочка «не переспрашивать».
+            return !settings.ReuseOtherEngines || FindAnyLlmSuggestion(cached, reviewPath, item.Word) == null;
+        }).ToList();
+        if (pending.Count < items.Count)
+            Console.WriteLine($"Уже проверялись ранее (повторно не отправляются): {items.Count - pending.Count}.");
+
+        Console.WriteLine($"Слов для ИИ-проверки: {pending.Count} (групп слов {groups.Count}).");
+        var outcome = RunLlmStressCheck(pending, reviewPath, message => Console.WriteLine(message),
+            CancellationToken.None, engine);
+        if (!outcome.Ok)
+        {
+            Console.Error.WriteLine(outcome.Message);
+            return 1;
+        }
+
+        Console.WriteLine($"Подсказок принято: {outcome.Answered} из {outcome.Items}; отклонено: {outcome.Rejected.Count}; движок: {outcome.Device}; {outcome.Seconds:0} с.");
+        foreach (var item in items)
+        {
+            var itemKey = LlmCacheKey(engine.Id, reviewPath, item.Word);
+            if (outcome.Suggestions.TryGetValue(item.Word, out var suggestion))
+            {
+                Console.WriteLine($"  {item.Word} → {suggestion}");
+                continue;
+            }
+            if (cached.TryGetValue(itemKey, out var knownGood))
+            {
+                Console.WriteLine($"  {item.Word} → {knownGood} (из кэша)");
+                continue;
+            }
+            if (outcome.Rejected.TryGetValue(item.Word, out var rejected) && !string.IsNullOrEmpty(rejected.Raw))
+            {
+                Console.WriteLine($"  {item.Word} → модель ответила «{rejected.Raw}» ({rejected.Reason})");
+                continue;
+            }
+            if (failures.TryGetValue(itemKey, out var known) && !string.IsNullOrEmpty(known.Raw))
+            {
+                Console.WriteLine($"  {item.Word} → модель отвечала «{known.Raw}» ({known.Reason})");
+                continue;
+            }
+            Console.WriteLine($"  {item.Word} → (нет ответа)");
+        }
+
+        foreach (var pair in outcome.Suggestions) cached[LlmCacheKey(engine.Id, reviewPath, pair.Key)] = pair.Value;
+        SaveLlmSuggestions(cached);
+        foreach (var pair in outcome.Rejected)
+            failures[LlmCacheKey(engine.Id, reviewPath, pair.Key)] = new LlmFailure(pair.Key, pair.Value.Raw, pair.Value.Reason);
+        SaveLlmFailures(failures);
+        Console.WriteLine("Подсказки сохранены в " + LlmSuggestionsPath);
+        Console.WriteLine("Подробности по каждому слову: " + LlmLogPath);
+        return 0;
+    }
+
+    // Тест движка на контрольных словах: скорость и число верных ударений.
+    internal static LlmBenchmarkResult RunLlmBenchmark(LlmEngine engine, Action<string> report, CancellationToken token)
+    {
+        var items = LlmBenchmarkWords
+            .Select(pair => new LlmStressItem(pair.Word, new[] { pair.Context }))
+            .ToList();
+        var outcome = RunLlmStressCheck(items, "контрольные-слова", report, token, engine, benchmark: true);
+        if (!outcome.Ok)
+            return new LlmBenchmarkResult(false, outcome.Message, engine.Id, engine.Title, 0, items.Count, 0,
+                Array.Empty<string>());
+
+        var correct = 0;
+        var details = new List<string>();
+        foreach (var (word, stress, _) in LlmBenchmarkWords)
+        {
+            var expected = StressMarked(word, stress);
+            var got = outcome.Suggestions.TryGetValue(word, out var value) ? value : null;
+            if (string.Equals(got, expected, StringComparison.Ordinal))
+            {
+                correct++;
+                details.Add($"верно\t{word}\t{expected}");
+            }
+            else
+            {
+                details.Add($"неверно\t{word}\t{expected}\t{got ?? "(нет ответа)"}");
+            }
+        }
+        return new LlmBenchmarkResult(true, "", engine.Id, engine.Title, correct, items.Count, outcome.Seconds, details);
+    }
+
+    internal sealed record LlmBenchmarkResult(bool Ok, string Message, string EngineId, string Title,
+        int Correct, int Total, double Seconds, IReadOnlyList<string> Details);
+
+    // Рекомендация по движкам: сначала больше верных ударений, затем меньше времени.
+    internal static string? LlmBenchmarkAdvice()
+    {
+        var benchmarks = LoadLlmSettings().Benchmarks;
+        if (benchmarks == null || benchmarks.Count == 0) return null;
+        var best = benchmarks.Values
+            .OrderByDescending(item => item.Total == 0 ? 0 : (double)item.Correct / item.Total)
+            .ThenBy(item => item.Seconds)
+            .First();
+        return $"Лучший результат: {best.Title} — {best.Correct} из {best.Total} верных ударений, " +
+               $"{best.Seconds:0} с ({best.Seconds / Math.Max(1, best.Total):0.0} с на слово).";
+    }
+
+    private static int RunLlmBenchmarkCommand(LlmEngine engine)
+    {
+        Console.WriteLine("Движок: " + engine.Title);
+        var result = RunLlmBenchmark(engine, message => Console.WriteLine(message), CancellationToken.None);
+        if (!result.Ok)
+        {
+            Console.Error.WriteLine(result.Message);
+            return 1;
+        }
+        Console.WriteLine($"Верных ударений: {result.Correct} из {result.Total}; время: {result.Seconds:0} с " +
+                          $"({result.Seconds / Math.Max(1, result.Total):0.0} с на слово).");
+        foreach (var line in result.Details) Console.WriteLine("  " + line.Replace('\t', ' '));
+        SaveLlmBenchmark(result);
+        var advice = LlmBenchmarkAdvice();
+        if (advice != null) Console.WriteLine(advice);
+        return 0;
+    }
+
+    // Список моделей у внешнего сервиса: Ollama отдаёт его на /api/tags, OpenAI-совместимые — на /models.
+    internal static List<string> ListRemoteLlmModels(LlmEngine engine, out string error)
+    {
+        error = "";
+        var models = new List<string>();
+        string script;
+        string python;
+        try
+        {
+            script = ExtractEmbeddedFile("DSR.llm_stress_worker.py", "llm_stress_worker.py");
+            python = EnsurePythonRuntime();
+        }
+        catch (Exception problem)
+        {
+            error = problem.Message;
+            return models;
+        }
+
+        var start = new ProcessStartInfo(python)
+        {
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+            StandardOutputEncoding = new UTF8Encoding(false),
+            StandardErrorEncoding = new UTF8Encoding(false),
+        };
+        start.Environment["PYTHONUTF8"] = "1";
+        foreach (var argument in new[]
+                 {
+                     "-u", script, "--list-models", "--provider", engine.Provider,
+                     "--base-url", engine.BaseUrl, "--remote-model", engine.RemoteModel,
+                 })
+            start.ArgumentList.Add(argument);
+        if (!string.IsNullOrWhiteSpace(engine.ApiKey)) start.Environment["DSR_LLM_API_KEY"] = engine.ApiKey;
+
+        try
+        {
+            using var process = System.Diagnostics.Process.Start(start)
+                ?? throw new InvalidOperationException("Не удалось запустить список моделей.");
+            var output = process.StandardOutput.ReadToEnd();
+            var errorText = process.StandardError.ReadToEnd();
+            if (!process.WaitForExit(30000))
+            {
+                try { process.Kill(true); } catch { /* процесс уже завершился */ }
+                error = "Сервис не ответил за 30 с. Проверьте адрес: " + engine.BaseUrl;
+                return models;
+            }
+            foreach (var line in output.Split('\n'))
+            {
+                var data = TrimProtocolLine(line.TrimEnd('\r'));
+                if (data.StartsWith("DSR_LLM:available:", StringComparison.Ordinal))
+                    models.Add(data["DSR_LLM:available:".Length..]);
+                else if (data.StartsWith("DSR_LLM:error:", StringComparison.Ordinal))
+                    error = data["DSR_LLM:error:".Length..];
+            }
+            if (models.Count == 0 && error.Length == 0)
+                error = errorText.Trim().Length > 0
+                    ? errorText.Trim().Split('\n')[0]
+                    : "Сервис не сообщил ни одной модели.";
+        }
+        catch (Exception problem)
+        {
+            LogError("Список моделей внешнего сервиса", problem);
+            error = problem.Message;
+        }
+        return models;
+    }
+
+    // Ключи выбора движка для командной строки: --llm-provider local|ollama|openai,
+    // --llm-model <имя|путь>, --llm-url <адрес>, --llm-key <ключ>.
+    private static LlmEngine ParseLlmEngineArgs(string[] args, int start)
+    {
+        string? provider = null;
+        string? model = null;
+        string? url = null;
+        string? key = null;
+        for (var index = start; index + 1 < args.Length; index++)
+            switch (args[index])
+            {
+                case "--llm-provider": provider = args[index + 1].Trim().ToLowerInvariant(); break;
+                case "--llm-model": model = args[index + 1]; break;
+                case "--llm-url": url = args[index + 1]; break;
+                case "--llm-key": key = args[index + 1]; break;
+            }
+
+        var settings = LoadLlmSettings();
+        var chosen = provider ?? (settings.Provider ?? LlmEngine.Local).ToLowerInvariant();
+        if (chosen is not (LlmEngine.Local or LlmEngine.Ollama or LlmEngine.OpenAi))
+            throw new ArgumentException("--llm-provider принимает только local, ollama или openai.");
+        var local = CurrentLlmModel();
+        if (chosen == LlmEngine.Local) return new LlmEngine(chosen, model ?? local, "", "", "");
+        return new LlmEngine(
+            chosen,
+            local,
+            model ?? (chosen == LlmEngine.Ollama ? settings.OllamaModel : settings.ApiModel) ?? "",
+            url ?? (chosen == LlmEngine.Ollama ? settings.OllamaUrl : settings.ApiUrl) ?? "",
+            chosen == LlmEngine.OpenAi ? key ?? settings.ApiKey ?? Environment.GetEnvironmentVariable("DSR_LLM_API_KEY") ?? "" : "");
+    }
+
+    private static string TrimProtocolLine(string line)
+    {
+        var start = 0;
+        while (start < line.Length && (line[start] == '\0' || line[start] == '\uFEFF' || line[start] == '\u200B'))
+            start++;
+        return start == 0 ? line : line[start..];
+    }
+
+    // Превращает технические строки воркера в короткие понятные сообщения о ходе работы.
+    private static IEnumerable<string> TranslateLlmProgress(string payload)
+    {
+        // Путь к модели содержит «:», поэтому тег отделяем только по первому двоеточию.
+        var colon = payload.IndexOf(':');
+        var tag = colon < 0 ? payload : payload[..colon];
+        var rest = colon < 0 ? string.Empty : payload[(colon + 1)..];
+        switch (tag)
+        {
+            case "model":
+                yield return "ИИ: модель " + Path.GetFileName(rest);
+                break;
+            case "words":
+                yield return $"ИИ: слов для проверки — {rest}";
+                break;
+            case "device":
+                yield return $"ИИ: вычисления на {rest}";
+                break;
+            case "loaded":
+                yield return $"ИИ: модель загружена за {rest} с";
+                break;
+            case "warning":
+                yield return "ИИ: " + rest;
+                break;
+            case "batch_error":
+                yield return "ИИ: ошибка запроса — " + rest;
+                break;
+            case "retry_start":
+                yield return $"ИИ: уточняю {rest} слов по одному…";
+                break;
+            case "progress":
+                // progress:<проход>:<готово>/<всего>:<секунды>
+                var fields = rest.Split(':');
+                if (fields.Length >= 3)
+                {
+                    var stage = fields[0] == "2" ? "уточнение" : "первый проход";
+                    yield return $"ИИ ({stage}): {fields[1]}, {fields[2]}";
+                }
+                break;
+            case "done":
+                yield return "ИИ: подсказок получено " + rest;
+                break;
+            default:
+                yield return "ИИ: " + payload;
+                break;
+        }
     }
 
     private static string EnsureDialogueInitialWordAccent(string source, string modelOutput, RuAccentWorker accentizer)
@@ -1764,6 +2875,13 @@ internal static class Program
         var byteCount = input.LongLength;
         var characterCount = processableText.Sum(node => (long)node.Value.Length);
         var wordReview = new List<string>();
+        // Polysyllabic words the model left unmarked, the original text of every node
+        // (kept so the review can be rebuilt after the dictionary pass), and which
+        // nodes were accented successfully — failed nodes stay untouched and must not
+        // receive a dictionary stress mark or reappear in the review.
+        var residueWords = new HashSet<string>(StringComparer.Ordinal);
+        var sourceTexts = processableText.Select(node => node.Value).ToArray();
+        var reviewable = new bool[processableText.Length];
         if (diagnostics != null)
         {
             diagnostics.TotalUnits = processableText.Length;
@@ -1792,7 +2910,7 @@ internal static class Program
             {
                 control?.Checkpoint();
                 var textNode = processableText[batchStart + offset];
-                var sourceText = textNode.Value;
+                var sourceText = sourceTexts[batchStart + offset];
                 var inference = batchOutputs[offset];
                 completedText++;
                 if (inference.Error != null)
@@ -1813,8 +2931,10 @@ internal static class Program
                         var modelProcessedWithPunctuation = EnsureOriginalPunctuation(sourceText, modelProcessed);
                         var accented = ApplyYoDictionary(modelProcessedWithPunctuation);
                         var reviewCountBefore = wordReview.Count;
-                        CollectUnrecognizedWords(sourceText, accented, wordReview);
+                        foreach (var word in CollectUnrecognizedWords(sourceText, accented, wordReview))
+                            residueWords.Add(DictionaryKey(word));
                         if (diagnostics != null) diagnostics.UnrecognizedWordCount += CountReviewWords(wordReview.Skip(reviewCountBefore));
+                        reviewable[batchStart + offset] = true;
                         if (!string.Equals(accented, sourceText, StringComparison.Ordinal))
                         {
                             textNode.Value = accented;
@@ -1845,6 +2965,26 @@ internal static class Program
                     reportProgress?.Invoke(completedText, processableText.Length);
                 }
             }
+        }
+
+        // The model leaves some polysyllabic words unmarked; RUAccent's bundled full
+        // stress dictionary usually knows them. Resolve once for the whole file, add
+        // the marks it knows, then rebuild the review so only truly unknown words
+        // remain for the manual pass (see ConvertTextFile).
+        var dictionaryStress = accentizer.ResolveWords(residueWords.ToArray());
+        if (dictionaryStress.Count > 0)
+        {
+            for (var index = 0; index < processableText.Length; index++)
+                if (reviewable[index])
+                    processableText[index].Value = ApplyDictionaryStress(processableText[index].Value, dictionaryStress);
+            wordReview.Clear();
+            for (var index = 0; index < processableText.Length; index++)
+                if (reviewable[index])
+                    CollectUnrecognizedWords(sourceTexts[index], processableText[index].Value, wordReview);
+            changed = 0;
+            for (var index = 0; index < processableText.Length; index++)
+                if (!string.Equals(processableText[index].Value, sourceTexts[index], StringComparison.Ordinal)) changed++;
+            if (diagnostics != null) diagnostics.DictionaryStressCount = dictionaryStress.Count;
         }
 
         if (document.Declaration != null)
@@ -1878,7 +3018,7 @@ internal static class Program
             WriteWordReview(outputPath, wordReview);
             conversionTimer.Stop();
             LogConversion(inputPath, byteCount, characterCount, conversionTimer.Elapsed, TimeSpan.Zero, "Завершено");
-            Console.WriteLine($"  Узлов текста с изменениями: {changed}; исправлено пробелов на границах: {normalized}");
+            Console.WriteLine($"  Узлов текста с изменениями: {changed}; исправлено пробелов на границах: {normalized}; подставлено из словаря: {dictionaryStress.Count}");
         }
         finally
         {
@@ -1912,6 +3052,24 @@ internal static class Program
         Console.WriteLine("      [--suffix _ударения] [--model turbo3.1] [--no-dictionary] [--device CPU|CUDA]\n");
         Console.WriteLine("По умолчанию создаётся копия рядом с источником с суффиксом _ударения.");
         Console.WriteLine("При передаче папки в -o файлы помещаются в неё; структура подпапок при --recursive сохраняется.");
+        Console.WriteLine("\nПроверка остатка слов моделью ИИ (без интерфейса):");
+        Console.WriteLine("  DSR.exe --llm-stress \"<книга>_ударения_проверка-слов.txt\" [--llm-provider local|ollama|openai]");
+        Console.WriteLine("      [--llm-model <модель>] [--llm-url <адрес>] [--llm-key <ключ>]");
+        Console.WriteLine("      Подбирает ударения для слов, которых нет в словаре, и сохраняет подсказки");
+        Console.WriteLine("      в кэш. Ничего не применяется автоматически. Слова, по которым ответа не");
+        Console.WriteLine("      было, повторно не отправляются (список: ресурсы\\llm-без-ответа.json).");
+        Console.WriteLine("      --llm-provider local — своя модель из ресурсы\\модели\\llm (по умолчанию),");
+        Console.WriteLine("      ollama — свой сервер Ollama, openai — внешний сервис с OpenAI-совместимым API.");
+        Console.WriteLine("      --llm-model: для local имя папки или полный путь, для сервисов — имя модели.");
+        Console.WriteLine("      Ключ внешнего сервиса можно задать переменной окружения DSR_LLM_API_KEY.\n");
+        Console.WriteLine("Тест движка на контрольных словах (скорость и точность, с рекомендацией):");
+        Console.WriteLine("  DSR.exe --llm-benchmark [--llm-provider ... --llm-model ... --llm-url ... --llm-key ...]\n");
+        Console.WriteLine("Список моделей ИИ, лежащих рядом с программой:");
+        Console.WriteLine("  DSR.exe --llm-models");
+        Console.WriteLine("Список моделей у внешнего сервиса (например, загруженных в Ollama):");
+        Console.WriteLine("  DSR.exe --llm-remote-models --llm-provider ollama [--llm-url http://127.0.0.1:11434]");
+        Console.WriteLine("\nОкно проверки слов отдельно (когда книга уже сконвертирована):");
+        Console.WriteLine("  DSR.exe --review \"<книга>_ударения_проверка-слов.txt\" [\"<книга>_ударения.fb2\"]");
         Console.WriteLine($"Ресурсы DSR хранятся рядом с приложением: {DataDirectory}");
     }
 
@@ -2014,6 +3172,17 @@ internal static class Program
             Start();
         }
 
+        // Trims leading control characters (notably a stray NUL emitted by onnxruntime on the
+        // shared stderr handle) so protocol prefixes are still recognised, while keeping the
+        // rest of the line — including meaningful Cyrillic text — untouched.
+        private static string TrimProtocolPrefix(string line)
+        {
+            var start = 0;
+            while (start < line.Length && (line[start] == '\0' || line[start] == '\uFEFF' || line[start] == '\u200B'))
+                start++;
+            return start == 0 ? line : line[start..];
+        }
+
         public void Start()
         {
             if (_process != null) return;
@@ -2046,16 +3215,22 @@ internal static class Program
             _process.ErrorDataReceived += (_, e) =>
             {
                 if (e.Data == null) return;
-                if (e.Data.StartsWith("DSR_PROGRESS:", StringComparison.Ordinal))
-                    _report?.Invoke(e.Data["DSR_PROGRESS:".Length..]);
-                else if (e.Data.StartsWith("DSR_PERF:", StringComparison.Ordinal))
+                // onnxruntime writes to the shared stderr fd directly and can leave a stray
+                // NUL/control char in front of the first line our worker prints afterwards
+                // (observed: "\0DSR_PERF:omograph_model:…"). Without this trim the line was
+                // silently dropped from the report, making it look like the omograph model
+                // never loaded and hiding real model switches.
+                var data = TrimProtocolPrefix(e.Data);
+                if (data.StartsWith("DSR_PROGRESS:", StringComparison.Ordinal))
+                    _report?.Invoke(data["DSR_PROGRESS:".Length..]);
+                else if (data.StartsWith("DSR_PERF:", StringComparison.Ordinal))
                 {
-                    _diagnostics?.PerformanceEvents.Add(e.Data["DSR_PERF:".Length..]);
-                    _report?.Invoke(e.Data);
+                    _diagnostics?.PerformanceEvents.Add(data["DSR_PERF:".Length..]);
+                    _report?.Invoke(data);
                 }
-                else if (e.Data.StartsWith("DSR_INFERENCE:", StringComparison.Ordinal))
+                else if (data.StartsWith("DSR_INFERENCE:", StringComparison.Ordinal))
                 {
-                    if (double.TryParse(e.Data.AsSpan("DSR_INFERENCE:".Length), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var seconds))
+                    if (double.TryParse(data.AsSpan("DSR_INFERENCE:".Length), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var seconds))
                     {
                         _workerInferenceTime += TimeSpan.FromSeconds(seconds);
                         _workerCallCount++;
@@ -2065,7 +3240,7 @@ internal static class Program
                             _diagnostics.InferenceCalls = _workerCallCount;
                         }
                     }
-                    _report?.Invoke(e.Data);
+                    _report?.Invoke(data);
                 }
                 else lock (errors) errors.AppendLine(e.Data);
             };
@@ -2137,6 +3312,34 @@ internal static class Program
                 if (index != texts.Count)
                     throw new InvalidOperationException("ruaccent вернул неполный ответ на пакет.");
                 return results;
+            }
+        }
+
+        // Asks the worker to look words up in RUAccent's bundled full stress
+        // dictionary (accents.json.gz). The worker streams the file on first use and
+        // caches the answers, so repeated conversions are cheap and its memory stays
+        // proportional to the requested words, never to the 3.2M-entry dictionary.
+        public IReadOnlyDictionary<string, string> ResolveWords(IReadOnlyList<string> words)
+        {
+            var map = new Dictionary<string, string>(StringComparer.Ordinal);
+            if (words.Count == 0) return map;
+            lock (_sync)
+            {
+                var process = _process ?? throw new InvalidOperationException("ruaccent не запущен.");
+                var json = JsonSerializer.Serialize(new { op = "resolve", words });
+                process.StandardInput.WriteLine(json);
+                process.StandardInput.Flush();
+                var response = process.StandardOutput.ReadLine();
+                if (response == null)
+                    throw new InvalidOperationException("Процесс ruaccent завершился без ответа.");
+                using var document = JsonDocument.Parse(response);
+                if (document.RootElement.TryGetProperty("error", out var error))
+                    throw new InvalidOperationException(error.GetString() ?? "Ошибка ruaccent");
+                if (document.RootElement.TryGetProperty("resolved", out var resolved) && resolved.ValueKind == JsonValueKind.Object)
+                    foreach (var property in resolved.EnumerateObject())
+                        if (property.Value.ValueKind == JsonValueKind.String)
+                            map[property.Name] = property.Value.GetString()!;
+                return map;
             }
         }
 

@@ -19,6 +19,11 @@ public sealed partial class WordReviewWindow : Window
     private readonly List<RadioButton> _vowels = new();
     private readonly List<TextBox> _declensions = new();
     private Dictionary<string, int> _wordCounts = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> _llmSuggestions = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, Program.LlmRejected> _llmRejected = new(StringComparer.Ordinal);
+    private string _llmStatus = string.Empty;
+    private Program.LlmEngine _llmEngine = Program.CurrentLlmEngine();
+    private bool _updatingLlmEngine;
     private int _selectedGroupAnchor = -1;
     private int _selectedSampleIndex = -1;
     private bool _rebuildingSamples;
@@ -55,6 +60,8 @@ public sealed partial class WordReviewWindow : Window
         AddFormButton.Click += AddForm_Click;
         SaveCorrectionButton.Click += SaveCorrection_Click;
         ConfirmStressButton.Click += ConfirmStress_Click;
+        LlmCheckButton.Click += LlmCheck_Click;
+        InitializeLlmEngines();
         PreviewKeyDown += HandleReviewNavigationKey;
         WordGroupsListBox.PreviewKeyDown += HandleReviewNavigationKey;
         ContextsListBox.PreviewKeyDown += HandleReviewNavigationKey;
@@ -78,7 +85,13 @@ public sealed partial class WordReviewWindow : Window
             {
                 var first = group.First();
                 var count = _wordCounts.TryGetValue(first.entry.Word, out var found) ? found : 0;
-                return new ReviewItem(first.index, $"{first.entry.Word} — {count:N0} вхождений", first.entry.Word, count);
+                var key = ExactWordKey(first.entry.Word);
+                var hint = _llmSuggestions.TryGetValue(key, out var suggestion)
+                    ? $"  ·  ИИ: {suggestion}"
+                    : _llmRejected.TryGetValue(key, out var rejected)
+                        ? string.IsNullOrEmpty(rejected.Raw) ? "  ·  ИИ: нет ответа" : $"  ·  ИИ ответил: {rejected.Raw} (проверьте)"
+                        : string.Empty;
+                return new ReviewItem(first.index, $"{first.entry.Word} — {count:N0} вхождений{hint}", first.entry.Word, count);
             })
             .Where(item => string.IsNullOrEmpty(filter) || _entries.Any(entry => ExactWordKey(entry.Word) == ExactWordKey(item.Word) &&
                 (entry.Word.Contains(filter, StringComparison.OrdinalIgnoreCase) || entry.Context.Contains(filter, StringComparison.OrdinalIgnoreCase))));
@@ -129,6 +142,439 @@ public sealed partial class WordReviewWindow : Window
     private void LoadFiles_Click(object sender, RoutedEventArgs e) => LoadReviewFiles();
     private void SearchTextBox_TextChanged(object sender, TextChangedEventArgs e) => RebuildGroupList();
     private void SortModeComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e) => RebuildGroupList();
+
+    private async void LlmCheck_Click(object sender, RoutedEventArgs e) => await RunLlmCheckAsync();
+
+    // --- Движок подсказок: своя модель на диске, свой сервер Ollama или внешний API ----------
+    // Настройки сохраняются сразу при изменении: их читают и окно, и командная строка.
+    private static readonly (string Title, string Value)[] LlmProviders =
+    {
+        ("Своя модель на диске (ONNX)", Program.LlmEngine.Local),
+        ("Ollama — свой сервер", Program.LlmEngine.Ollama),
+        ("Внешний API (OpenAI-совместимый)", Program.LlmEngine.OpenAi),
+    };
+
+    private void InitializeLlmEngines()
+    {
+        var settings = Program.LoadLlmSettings();
+        _updatingLlmEngine = true;
+        LlmProviderComboBox.ItemsSource = LlmProviders.Select(item => item.Title).ToArray();
+        var providerIndex = Array.FindIndex(LlmProviders, item => item.Value == _llmEngine.Provider);
+        LlmProviderComboBox.SelectedIndex = providerIndex < 0 ? 0 : providerIndex;
+        LlmOllamaUrlTextBox.Text = string.IsNullOrWhiteSpace(settings.OllamaUrl) ? "http://127.0.0.1:11434" : settings.OllamaUrl;
+        LlmApiUrlTextBox.Text = string.IsNullOrWhiteSpace(settings.ApiUrl) ? "https://api.openai.com/v1" : settings.ApiUrl;
+        LlmApiKeyTextBox.Text = settings.ApiKey;
+        LlmOllamaModelComboBox.Text = settings.OllamaModel;
+        LlmApiModelComboBox.Text = settings.ApiModel;
+        LlmReuseCheckBox.IsChecked = settings.ReuseOtherEngines;
+        RefreshLocalModels();
+        _updatingLlmEngine = false;
+        UpdateLlmPanels();
+        ShowBenchmarkResult();
+
+        LlmProviderComboBox.SelectionChanged += (_, _) => { UpdateLlmPanels(); SaveLlmEngine(); };
+        LlmModelComboBox.SelectionChanged += (_, _) => SaveLlmEngine();
+        LlmLocalRefreshButton.Click += (_, _) => RefreshLocalModels();
+        LlmOllamaRefreshButton.Click += (_, _) => RefreshRemoteModels(Program.LlmEngine.Ollama, LlmOllamaModelComboBox, LlmOllamaRefreshButton);
+        LlmApiRefreshButton.Click += (_, _) => RefreshRemoteModels(Program.LlmEngine.OpenAi, LlmApiModelComboBox, LlmApiRefreshButton);
+        LlmOllamaUrlTextBox.LostFocus += (_, _) => SaveLlmEngine();
+        LlmOllamaModelComboBox.LostFocus += (_, _) => SaveLlmEngine();
+        LlmApiUrlTextBox.LostFocus += (_, _) => SaveLlmEngine();
+        LlmApiKeyTextBox.LostFocus += (_, _) => SaveLlmEngine();
+        LlmApiModelComboBox.LostFocus += (_, _) => SaveLlmEngine();
+        LlmReuseCheckBox.Checked += (_, _) => SaveLlmEngine();
+        LlmReuseCheckBox.Unchecked += (_, _) => SaveLlmEngine();
+        LlmBenchmarkButton.Click += LlmBenchmark_Click;
+    }
+
+    private string CurrentProvider() =>
+        LlmProviderComboBox.SelectedIndex >= 0 && LlmProviderComboBox.SelectedIndex < LlmProviders.Length
+            ? LlmProviders[LlmProviderComboBox.SelectedIndex].Value
+            : Program.LlmEngine.Local;
+
+    private void UpdateLlmPanels()
+    {
+        var provider = CurrentProvider();
+        LlmLocalPanel.Visibility = provider == Program.LlmEngine.Local ? Visibility.Visible : Visibility.Collapsed;
+        LlmOllamaPanel.Visibility = provider == Program.LlmEngine.Ollama ? Visibility.Visible : Visibility.Collapsed;
+        LlmApiPanel.Visibility = provider == Program.LlmEngine.OpenAi ? Visibility.Visible : Visibility.Collapsed;
+        RefreshLlmEngineText();
+    }
+
+    private void RefreshLlmEngineText() =>
+        LlmEngineTextBlock.Text = "Сейчас выбран: " + _llmEngine.Title +
+            ". Подсказки считаются отдельно для каждого движка и не смешиваются.";
+
+    // Настройки сохраняются по любым изменениям: следующее открытие окна и командная строка
+    // увидят то же самое.
+    private void SaveLlmEngine()
+    {
+        if (_updatingLlmEngine) return;
+        var provider = CurrentProvider();
+        var local = LlmModelComboBox.SelectedItem as string ?? _llmEngine.LocalModel;
+        Program.SaveLlmSettings(provider, local, LlmOllamaUrlTextBox.Text.Trim(), LlmOllamaModelComboBox.Text.Trim(),
+            LlmApiUrlTextBox.Text.Trim(), LlmApiModelComboBox.Text.Trim(), LlmApiKeyTextBox.Text.Trim(),
+            LlmReuseCheckBox.IsChecked == true);
+        var previous = _llmEngine;
+        _llmEngine = Program.CurrentLlmEngine();
+        RefreshLlmEngineText();
+        if (previous.Provider == _llmEngine.Provider && previous.Id == _llmEngine.Id) return;
+        // Уже найденные подсказки оставляем: они верны независимо от движка. Новый движок
+        // берётся только за слова, для которых подсказки ещё нет.
+        FileStatusTextBlock.Text =
+            $"Движок подсказок переключён: {previous.Title} → {_llmEngine.Title}." + Environment.NewLine +
+            "Нажмите «Подсказки ИИ по контексту»: уже найденные подсказки останутся, а новый движок" +
+            " займётся только оставшимися словами (у каждого движка свой список ответов).";
+    }
+
+    // Локальные модели: всё, что лежит в ресурсы\модели\llm и готово к запуску.
+    private void RefreshLocalModels()
+    {
+        var models = Program.DiscoverLlmModels();
+        var current = _llmEngine.LocalModel;
+        if (!models.Any(name => string.Equals(name, current, StringComparison.OrdinalIgnoreCase)))
+            models.Insert(0, current);
+        var wasUpdating = _updatingLlmEngine;
+        _updatingLlmEngine = true;
+        LlmModelComboBox.ItemsSource = models;
+        LlmModelComboBox.SelectedItem =
+            models.FirstOrDefault(name => string.Equals(name, current, StringComparison.OrdinalIgnoreCase));
+        _updatingLlmEngine = wasUpdating;
+    }
+
+    // Список моделей у внешнего сервиса: Ollama отдаёт загруженные модели, API — доступные.
+    private async void RefreshRemoteModels(string provider, ComboBox target, Button button)
+    {
+        target.IsEnabled = false;
+        button.IsEnabled = false;
+        button.Content = "Спрашиваю…";
+        var engine = BuildEngine(provider);
+        var error = "";
+        try
+        {
+            var models = await Task.Run(() =>
+            {
+                var list = Program.ListRemoteLlmModels(engine, out var problem);
+                error = problem;
+                return list;
+            });
+            if (error.Length > 0)
+            {
+                FileStatusTextBlock.Text = "Не удалось получить список моделей: " + error;
+                return;
+            }
+            var current = target.Text;
+            target.ItemsSource = models;
+            target.Text = models.Contains(current, StringComparer.OrdinalIgnoreCase)
+                ? current
+                : models.FirstOrDefault() ?? current;
+            FileStatusTextBlock.Text = models.Count == 0
+                ? "Сервис не сообщил ни одной модели. Проверьте адрес и наличие загруженных моделей."
+                : $"Сервис сообщил моделей: {models.Count}. Выберите нужную в списке «Модель».";
+            SaveLlmEngine();
+        }
+        catch (Exception problem)
+        {
+            Program.LogError("Список моделей внешнего сервиса", problem);
+            FileStatusTextBlock.Text = "Список моделей не получен: " + problem.Message;
+        }
+        finally
+        {
+            target.IsEnabled = true;
+            button.IsEnabled = true;
+            button.Content = "Список моделей";
+        }
+    }
+
+    // Движок по текущему состоянию полей — для проверки списка моделей и теста производительности,
+    // когда настройки ещё не успели сохраниться.
+    private Program.LlmEngine BuildEngine(string provider) => provider switch
+    {
+        Program.LlmEngine.Ollama => new Program.LlmEngine(provider, _llmEngine.LocalModel,
+            LlmOllamaModelComboBox.Text.Trim(), LlmOllamaUrlTextBox.Text.Trim(), ""),
+        Program.LlmEngine.OpenAi => new Program.LlmEngine(provider, _llmEngine.LocalModel,
+            LlmApiModelComboBox.Text.Trim(), LlmApiUrlTextBox.Text.Trim(), LlmApiKeyTextBox.Text.Trim()),
+        _ => new Program.LlmEngine(provider,
+            LlmModelComboBox.SelectedItem as string ?? _llmEngine.LocalModel, "", "", ""),
+    };
+
+    private async void LlmBenchmark_Click(object sender, RoutedEventArgs e)
+    {
+        SaveLlmEngine();
+        var engine = BuildEngine(CurrentProvider());
+        LlmBenchmarkButton.IsEnabled = false;
+        var progress = new LlmProgressWindow(
+            "Проверяю движок на контрольных словах с известным ударением. Это занимает столько же времени, сколько несколько десятков слов.");
+        progress.Owner = this;
+        progress.Show();
+        try
+        {
+            var result = await Task.Run(() => Program.RunLlmBenchmark(engine,
+                message => Dispatcher.Invoke(() => { if (progress.IsLoaded) progress.SetStatus(message); }), progress.Token));
+            if (!result.Ok)
+            {
+                if (progress.Token.IsCancellationRequested) return;
+                MessageBox.Show(this, result.Message, "Проверка движка", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+            Program.SaveLlmBenchmark(result);
+            Program.LogReview($"Тест движка: {result.Title} — {result.Correct} из {result.Total} верных ударений за {result.Seconds:0} с.");
+            ShowBenchmarkResult();
+            var text = new StringBuilder();
+            text.AppendLine($"Движок: {result.Title}.");
+            text.AppendLine($"Верных ударений: {result.Correct} из {result.Total}; время: {result.Seconds:0} с " +
+                            $"({result.Seconds / Math.Max(1, result.Total):0.0} с на слово).");
+            text.AppendLine();
+            foreach (var line in result.Details)
+            {
+                var parts = line.Split('\t');
+                text.AppendLine(parts[0] == "верно"
+                    ? $"   ✓ {parts[1]} — {parts[2]}"
+                    : $"   ✗ {parts[1]} — верно {parts[2]}, получено {parts[3]}");
+            }
+            text.AppendLine();
+            text.AppendLine(Program.LlmBenchmarkAdvice());
+            MessageBox.Show(this, text.ToString(), "Проверка движка: скорость и точность",
+                MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+        catch (Exception problem)
+        {
+            Program.LogError("Тест движка подсказок", problem);
+            MessageBox.Show(this, "Тест движка не удался: " + problem.Message, "Ошибка",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        finally
+        {
+            progress.Close();
+            LlmBenchmarkButton.IsEnabled = true;
+        }
+    }
+
+    private void ShowBenchmarkResult()
+    {
+        var advice = Program.LlmBenchmarkAdvice();
+        LlmBenchmarkTextBlock.Text = advice ?? "Тест покажет, сколько ударений движок угадает и сколько времени это займёт.";
+    }
+
+    // Локальный ИИ-проход по контексту. Языковая модель на этом же компьютере (или внешний сервис)
+    // подбирает ударение для слов, которых нет ни в словаре RUAccent, ни в пользовательских
+    // ударениях. Результат — только подсказки: каждая принимается отдельно кнопкой «Да».
+    private async Task RunLlmCheckAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_reviewPath) || !File.Exists(_reviewPath))
+        {
+            MessageBox.Show(this, "Сначала выберите файл отчёта со словами для проверки.", "Нужен отчёт", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        if (_entries.Count == 0)
+        {
+            MessageBox.Show(this, "В отчёте нет слов для проверки.", "Нечего проверять", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        var groups = _entries
+            .GroupBy(entry => ExactWordKey(entry.Word), StringComparer.Ordinal)
+            .Select(group => group.ToArray())
+            .ToList();
+        var book = !string.IsNullOrWhiteSpace(_outputPath) ? _outputPath! : _reviewPath!;
+        var cache = Program.LoadLlmSuggestions();
+        var failures = Program.LoadLlmFailures();
+        var reuse = LlmReuseCheckBox.IsChecked == true;
+        var pending = new List<Program.LlmStressItem>();
+        var reused = 0;
+        var skipped = 0;
+        foreach (var group in groups)
+        {
+            var word = group[0].Word;
+            var key = ExactWordKey(word);
+            // Свой ответ — в этом проходе или из кэша — повторно не нужен: модель работает
+            // без случайности и вернула бы то же самое.
+            if (_llmSuggestions.ContainsKey(key)) { reused++; continue; }
+            if (cache.TryGetValue(Program.LlmCacheKey(_llmEngine.Id, book, word), out var ownAnswer) && Program.IsValidCorrection(word, ownAnswer))
+            {
+                _llmSuggestions[key] = ownAnswer;
+                reused++;
+                continue;
+            }
+            // Подсказка другого движка годится, пока не снята галочка «не переспрашивать»:
+            // тогда выбранный движок проверяет такие слова заново — ради второго мнения.
+            if (reuse && Program.FindAnyLlmSuggestion(cache, book, word) is { } fromOtherEngine && Program.IsValidCorrection(word, fromOtherEngine))
+            {
+                _llmSuggestions[key] = fromOtherEngine;
+                reused++;
+                continue;
+            }
+            // Слова, по которым этот движок уже не смог ответить, повторно не отправляются:
+            // генерация без случайности, повтор дал бы тот же результат, только снова минуты.
+            if (failures.TryGetValue(Program.LlmCacheKey(_llmEngine.Id, book, word), out var failed))
+            {
+                _llmRejected[key] = new Program.LlmRejected(failed.Raw, failed.Reason);
+                skipped++;
+                continue;
+            }
+            var contexts = group.Select(item => item.Context).Where(context => !string.IsNullOrWhiteSpace(context)).Distinct().Take(2).ToArray();
+            pending.Add(new Program.LlmStressItem(word, contexts));
+        }
+
+        if (pending.Count > 0)
+        {
+            LlmCheckButton.IsEnabled = false;
+            var progress = new LlmProgressWindow();
+            progress.Owner = this;
+            progress.Show();
+            try
+            {
+                var items = pending;
+                var outcome = await Task.Run(() => Program.RunLlmStressCheck(items, book,
+                    message => Dispatcher.Invoke(() => { if (progress.IsLoaded) progress.SetStatus(message); }), progress.Token));
+                if (!outcome.Ok)
+                {
+                    if (progress.Token.IsCancellationRequested) _llmStatus = "ИИ-проход прерван пользователем.";
+                    else
+                    {
+                        Program.LogReview("ИИ-проход не выполнен: " + outcome.Message);
+                        MessageBox.Show(this, outcome.Message, "ИИ-проверка", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    }
+                }
+                else
+                {
+                    foreach (var pair in outcome.Suggestions)
+                    {
+                        var suggestionKey = ExactWordKey(pair.Key);
+                        _llmSuggestions[suggestionKey] = pair.Value;
+                        // Если раньше по слову ответа не было, а теперь он есть — старая пометка не нужна.
+                        _llmRejected.Remove(suggestionKey);
+                        cache[Program.LlmCacheKey(_llmEngine.Id, book, pair.Key)] = pair.Value;
+                    }
+                    foreach (var pair in outcome.Rejected)
+                    {
+                        _llmRejected[ExactWordKey(pair.Key)] = pair.Value;
+                        failures[Program.LlmCacheKey(_llmEngine.Id, book, pair.Key)] =
+                            new Program.LlmFailure(pair.Key, pair.Value.Raw, pair.Value.Reason);
+                    }
+                    Program.SaveLlmSuggestions(cache);
+                    Program.SaveLlmFailures(failures);
+                    _llmStatus = $"ИИ: подсказок {outcome.Answered} из {outcome.Items}; движок: {outcome.Device}; {outcome.Seconds:0} с.";
+                    Program.LogReview(_llmStatus + " Журнал: " + Program.LlmLogPath);
+                    ShowLlmSummary(outcome, skipped);
+                }
+            }
+            catch (Exception error)
+            {
+                Program.LogError("ИИ-проверка остатка", error);
+                MessageBox.Show(this, "ИИ-проверка не удалась: " + error.Message, "Ошибка", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+            finally
+            {
+                progress.Close();
+                LlmCheckButton.IsEnabled = true;
+            }
+        }
+
+        RebuildGroupList();
+        // Сразу показываем первую группу с готовой подсказкой: иначе результат ИИ легко не заметить.
+        var listed = WordGroupsListBox.Items.Cast<ReviewItem>().ToArray();
+        var firstAnswered = listed.FirstOrDefault(item => _llmSuggestions.ContainsKey(ExactWordKey(item.Word)))
+            ?? listed.FirstOrDefault(item => _llmRejected.ContainsKey(ExactWordKey(item.Word)));
+        if (firstAnswered != null) WordGroupsListBox.SelectedItem = firstAnswered;
+        LlmCheckButton.Content = _llmSuggestions.Count > 0
+            ? $"Подсказки ИИ ({_llmSuggestions.Count})"
+            : "Подсказки ИИ по контексту";
+        Program.LogReview($"ИИ-подсказки в окне: принято {_llmSuggestions.Count}, без ответа {_llmRejected.Count}, " +
+            $"пропущено {skipped}, групп в списке {listed.Length}. Журнал: {Program.LlmLogPath}");
+        var summary = $"Подсказок ИИ: {_llmSuggestions.Count} (групп слов {groups.Count}"
+            + (reused > 0 ? $", из кэша {reused}" : string.Empty)
+            + (skipped > 0 ? $", без ответа ранее {skipped}" : string.Empty) + $"; движок {_llmEngine.Title}).";
+        FileStatusTextBlock.Text = _llmStatus.Length > 0
+            ? summary + Environment.NewLine + _llmStatus
+            : summary + Environment.NewLine + "Подсказка видна сверху над полем «Исправленный вариант»; подтверждайте по одной кнопкой «Да».";
+    }
+
+    // Короткий отчёт после ИИ-прохода: сколько слов получило подсказку, почему по остальным
+    // применить нечего и где лежит подробный журнал по каждому слову.
+    private void ShowLlmSummary(Program.LlmStressOutcome outcome, int skipped)
+    {
+        var text = new System.Text.StringBuilder();
+        text.AppendLine($"Движок: {_llmEngine.Title}.");
+        text.AppendLine($"Подсказка получена по {outcome.Answered} словам из {outcome.Items}.");
+        text.AppendLine();
+        if (outcome.Answered > 0)
+            text.AppendLine("Слова с подсказкой помечены в списке слов как «· ИИ: …», вариант уже стоит");
+        if (outcome.Answered > 0)
+            text.AppendLine("в поле «Исправленный вариант» — проверяйте и нажимайте «Да ✓».");
+        var reasons = outcome.Rejected.GroupBy(pair => ReasonLabel(pair.Value.Reason))
+            .OrderByDescending(group => group.Count()).ToArray();
+        if (reasons.Length > 0)
+        {
+            text.AppendLine();
+            text.AppendLine("По остальным словам ответа нет:");
+            foreach (var group in reasons) text.AppendLine($"  • {group.Key}: {group.Count()}");
+        }
+        if (skipped > 0)
+        {
+            text.AppendLine();
+            text.AppendLine($"{skipped} слов уже проверялись ранее и остались без ответа — повторно они не отправлялись.");
+            text.AppendLine("Чтобы попробовать их снова, удалите файл " + Program.LlmFailuresPath);
+        }
+        text.AppendLine();
+        text.AppendLine("Подтверждайте подсказки по одной кнопкой «Да ✓», затем «Применить всё и сохранить».");
+        text.AppendLine("Подробный журнал: " + Program.LlmLogPath);
+        MessageBox.Show(this, text.ToString(), "ИИ-проверка ударений", MessageBoxButton.OK, MessageBoxImage.Information);
+    }
+
+    private static string ReasonLabel(string reason) => reason switch
+    {
+        "form_mismatch" => "модель ответила другой формой слова",
+        "other_word" => "модель назвала другое слово",
+        "none" or "" => "модель не ответила",
+        _ => reason,
+    };
+
+    // Небольшое немодальное окно: показывает, что делает модель, и позволяет прервать проход.
+    private sealed class LlmProgressWindow : Window
+    {
+        private readonly TextBlock _status;
+        private readonly CancellationTokenSource _cancellation = new();
+
+        public CancellationToken Token => _cancellation.Token;
+
+        public LlmProgressWindow(string headline = "Выбранный движок подбирает ударение для слов, которых не было в словаре. Это занимает несколько минут и нагружает видеокарту.")
+        {
+            Title = "ИИ-проверка ударений";
+            Width = 560;
+            SizeToContent = SizeToContent.Height;
+            WindowStartupLocation = WindowStartupLocation.CenterOwner;
+            ResizeMode = ResizeMode.NoResize;
+            Background = new SolidColorBrush(Color.FromRgb(0xF4, 0xED, 0xDD));
+            var panel = new StackPanel { Margin = new Thickness(18) };
+            panel.Children.Add(new TextBlock
+            {
+                Text = headline,
+                TextWrapping = TextWrapping.Wrap,
+            });
+            panel.Children.Add(new ProgressBar { IsIndeterminate = true, Height = 6, Margin = new Thickness(0, 14, 0, 8) });
+            _status = new TextBlock { Text = "Запускаю модель…", TextWrapping = TextWrapping.Wrap };
+            panel.Children.Add(_status);
+            var cancel = new Button
+            {
+                Content = "Прервать",
+                HorizontalAlignment = HorizontalAlignment.Right,
+                Margin = new Thickness(0, 14, 0, 0),
+                Padding = new Thickness(14, 4, 14, 4),
+            };
+            cancel.Click += (_, _) => { _cancellation.Cancel(); _status.Text = "Прерываю…"; };
+            panel.Children.Add(cancel);
+            Content = panel;
+        }
+
+        public void SetStatus(string message) => _status.Text = message;
+
+        protected override void OnClosed(EventArgs e)
+        {
+            _cancellation.Cancel();
+            base.OnClosed(e);
+        }
+    }
 
     private void WordGroupsListBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
@@ -427,8 +873,36 @@ public sealed partial class WordReviewWindow : Window
         SelectionCountTextBlock.Text = $"Включено образцов: {group.Count(pair => pair.entry.Included)} из {group.Length}";
         _updatingCorrection = true;
         var proposed = group.Select(pair => pair.entry.Proposed).FirstOrDefault(value => !string.IsNullOrWhiteSpace(value)) ?? selectedEntry.Word;
+        // Подсказка ИИ подставляется только вместо «ударения по умолчанию»: если пользователь
+        // уже ввёл свою правку, она важнее. Принимает подсказку всё равно пользователь кнопкой «Да».
+        var suggestion = _llmSuggestions.TryGetValue(wordKey, out var llmSuggestion) ? llmSuggestion : null;
+        if (suggestion != null && !Program.IsValidCorrection(selectedEntry.Word, suggestion)) suggestion = null;
+        // Ответ модели другим словом (опечатка, старая форма, имя) принять как ударение нельзя,
+        // но если он близок по буквам, его можно предложить как исправление написания — тоже вручную.
+        var typoFix = suggestion != null || !_llmRejected.TryGetValue(wordKey, out var rejectedAnswer)
+            || string.IsNullOrEmpty(rejectedAnswer.Raw) || !Program.IsValidTypoCorrection(selectedEntry.Word, rejectedAnswer.Raw)
+            ? null : rejectedAnswer.Raw;
+        var prefilled = false;
+        if (!proposed.Contains('\u0301') && !proposed.Contains('ё', StringComparison.OrdinalIgnoreCase))
+        {
+            if (suggestion != null) { proposed = suggestion; prefilled = true; }
+            else if (typoFix != null) { proposed = typoFix; prefilled = true; }
+        }
         CorrectionTextBox.Text = proposed.Contains('\u0301') || proposed.Contains('ё', StringComparison.OrdinalIgnoreCase) ? proposed : DefaultInitialStress(proposed);
         _updatingCorrection = false;
+        var hint = suggestion != null
+            ? prefilled
+                ? $"ИИ предлагает «{suggestion}» — вариант уже подставлен в поле «Исправленный вариант». Проверьте и нажмите «Да ✓»."
+                : $"ИИ предлагает «{suggestion}» — в поле «Исправленный вариант» стоит ваша прежняя правка, ИИ её не перебивает."
+            : typoFix != null
+                ? $"ИИ предлагает другое написание: «{typoFix}» — буквы отличаются от исходного слова. Нажмите «Да», если форма верная, или исправьте вручную."
+                : _llmRejected.TryGetValue(wordKey, out var otherAnswer)
+                    ? string.IsNullOrEmpty(otherAnswer.Raw)
+                        ? "ИИ не подобрал ударение для этого слова — выберите ударную гласную вручную."
+                        : $"ИИ ответил иначе: «{otherAnswer.Raw}» — буквы не совпали с исходным словом, поэтому автоматически не подставляется."
+                    : string.Empty;
+        LlmHintTextBlock.Text = hint;
+        LlmHintPanel.Visibility = hint.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
         StressChoicesPanel.Children.Clear();
         _vowels.Clear();
         DeclensionRowsPanel.Children.Clear();

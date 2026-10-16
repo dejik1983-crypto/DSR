@@ -64,7 +64,7 @@
     <DockPanel Margin="22">
         <StackPanel DockPanel.Dock="Top" Margin="0,0,0,16">
             <TextBlock Text="Расстановка ударений в FB2 и TXT" FontSize="25" FontWeight="SemiBold" Foreground="{StaticResource Ink}" />
-            <TextBlock Text="Создайте копию книги с ударениями. Исходный файл не изменяется." Margin="0,5,0,0" Foreground="{StaticResource MutedInk}" TextWrapping="Wrap" />
+            <TextBlock Text="Порядок работы: 1 — настройки, 2 — выбор файла, 3 — конвертация, 4 — доработка результата. Исходный файл не изменяется." Margin="0,5,0,0" Foreground="{StaticResource MutedInk}" TextWrapping="Wrap" />
         </StackPanel>
         <StackPanel DockPanel.Dock="Bottom" Margin="0,8,0,0">
             <TextBlock x:Name="ModelStatusText" TextWrapping="Wrap" Margin="0,4,0,0" Foreground="{StaticResource MutedInk}" />
@@ -80,22 +80,7 @@
         </StackPanel>
         <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
             <StackPanel>
-                <GroupBox Header="1. Файл книги">
-                    <DockPanel>
-                        <Button x:Name="BrowseInputButton" DockPanel.Dock="Right" Content="Выбрать FB2 или TXT…" />
-                        <TextBox x:Name="InputTextBox" IsReadOnly="True" Margin="0,0,10,0" ToolTip="Путь к исходному файлу" />
-                    </DockPanel>
-                </GroupBox>
-                <GroupBox Header="2. Куда сохранить результат">
-                    <StackPanel>
-                        <DockPanel>
-                            <Button x:Name="BrowseOutputButton" DockPanel.Dock="Right" Content="Путь…" />
-                            <TextBox x:Name="OutputTextBox" ToolTip="Путь к результату" />
-                        </DockPanel>
-                        <TextBlock Text="По умолчанию результат сохраняется рядом с исходником: «Имя_ударения.fb2» для FB2 или «Имя_ударения.txt» для TXT. Формат входа и выхода должен совпадать." Margin="0,7,0,0" Foreground="{StaticResource MutedInk}" TextWrapping="Wrap" />
-                    </StackPanel>
-                </GroupBox>
-                <GroupBox Header="3. Параметры обработки">
+                <GroupBox Header="1. Параметры обработки">
                     <StackPanel>
                         <WrapPanel VerticalAlignment="Center">
                             <TextBlock Text="Модель ударений:" VerticalAlignment="Center" Margin="0,0,8,0" />
@@ -109,7 +94,32 @@
                         <TextBlock Text="Выбор модели меняет только модель омографов RUAccent; turbo — универсальная, big_poetry ориентирована на стихи, tiny — облегчённая. CUDA используется RUAccent через ONNX Runtime.  Галочка сохранения иллюстраций действует для FB2." Margin="0,8,0,0" Foreground="{StaticResource MutedInk}" TextWrapping="Wrap" />
                     </StackPanel>
                 </GroupBox>
-                <GroupBox Header="Дополнительно">
+                <GroupBox Header="2. Файл книги">
+                    <DockPanel>
+                        <Button x:Name="BrowseInputButton" DockPanel.Dock="Right" Content="Выбрать FB2 или TXT…" />
+                        <TextBox x:Name="InputTextBox" IsReadOnly="True" Margin="0,0,10,0" ToolTip="Путь к исходному файлу" />
+                    </DockPanel>
+                </GroupBox>
+                <GroupBox Header="3. Куда сохранить результат">
+                    <StackPanel>
+                        <DockPanel>
+                            <Button x:Name="BrowseOutputButton" DockPanel.Dock="Right" Content="Путь…" />
+                            <TextBox x:Name="OutputTextBox" ToolTip="Путь к результату" />
+                        </DockPanel>
+                        <TextBlock Text="По умолчанию результат сохраняется рядом с исходником: «Имя_ударения.fb2» для FB2 или «Имя_ударения.txt» для TXT. Формат входа и выхода должен совпадать." Margin="0,7,0,0" Foreground="{StaticResource MutedInk}" TextWrapping="Wrap" />
+                    </StackPanel>
+                </GroupBox>
+                <GroupBox Header="4. Доработка после конвертации">
+                    <StackPanel>
+                        <TextBlock Text="Программа расставляет ударения сама. Что осталось непонятным (редкие слова, имена, диалект), она соберёт в отчёт «…_ударения_проверка-слов.txt» — его можно просмотреть здесь и поправить вручную, в том числе подсказками ИИ." Margin="0,0,0,8" Foreground="{StaticResource MutedInk}" TextWrapping="Wrap" />
+                        <WrapPanel>
+                            <Button x:Name="ReviewWordsButton" Content="Проверить слова / правки…" IsEnabled="False"
+                                    ToolTip="Открывает окно проверки: список слов без ударения, ручные правки, подсказки локальной модели или внешнего сервиса." />
+                        </WrapPanel>
+                        <TextBlock Text="Кнопка станет доступна после конвертации: в окно подставляется результат последнего запуска." Margin="0,6,0,0" Foreground="{StaticResource MutedInk}" TextWrapping="Wrap" />
+                    </StackPanel>
+                </GroupBox>
+                <GroupBox Header="5. Ресурсы и обслуживание">
                     <StackPanel>
                         <GroupBox Header="Использование ресурсов">
                             <Grid>
@@ -124,7 +134,6 @@
                         <TextBlock x:Name="ResourceSizeStatusText" TextWrapping="Wrap" Foreground="{StaticResource MutedInk}" Margin="0,0,0,8" />
                         <WrapPanel>
                             <Button x:Name="ClearCacheButton" Content="Очистить модели и кэш" ToolTip="Удаляет папку ресурсов рядом с приложением; приложение и ваши книги не затрагиваются." />
-                            <Button x:Name="ReviewWordsButton" Content="Проверить слова / правки…" IsEnabled="False" />
                         </WrapPanel>
                     </StackPanel>
                 </GroupBox>
