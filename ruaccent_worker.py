@@ -479,7 +479,9 @@ def install_batched_pipeline(accentizer) -> None:
                 pieces.append(("".join(remaining_text), None))
                 continue
             if getattr(accentizer, "tiny_mode", False):
-                stress_usages = ["STRESS"] * len(text)
+                # Only one status per token is consumed below; sizing by the full
+                # input text needlessly allocates a list proportional to characters.
+                stress_usages = ["STRESS"] * len(sentence_words)
             else:
                 stress_usages = accentizer.extract_entities(accentizer.stress_usage_predictor.predict_stress_usage(sentence))
             processed_words = accentizer._process_yo(sentence_words, sentence)
@@ -500,23 +502,23 @@ def install_batched_pipeline(accentizer) -> None:
                         word_fixed = word_fixed[:e.start() + j] + ["+"] + list(word)[e.end() - 1:]
                     processed_words[i] = "".join(word_fixed)
             pieces.append((remaining_text, processed_words))
-        pending_words = []
-        pending_jobs = []
-        for job in jobs:
-            container, index, word = job
+        # Infer each distinct uncached word once, even if it occurs repeatedly
+        # within this paragraph. Preserve all positions for fan-out afterwards.
+        jobs_by_word = {}
+        for container, index, word in jobs:
             cached = _ACCENT_CACHE.get(word)
             if cached is not None:
                 _ACCENT_CACHE_HITS[0] += 1
                 container[index] = cached
             else:
-                pending_words.append(word)
-                pending_jobs.append(job)
-        if pending_words:
-            produced = _put_accent_batch(pending_words)
-            for word, produced_word, job in zip(pending_words, produced, pending_jobs):
-                container, index, _ = job
-                container[index] = produced_word
+                jobs_by_word.setdefault(word, []).append((container, index))
+        if jobs_by_word:
+            unique_words = list(jobs_by_word)
+            produced_words = _put_accent_batch(unique_words)
+            for word, produced_word in zip(unique_words, produced_words):
                 _cache_store(word, produced_word)
+                for container, index in jobs_by_word[word]:
+                    container[index] = produced_word
         assembled = []
         for remaining_text, processed_words in pieces:
             if processed_words is None:
