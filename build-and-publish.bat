@@ -8,7 +8,7 @@ echo.
 set "PROJECT=%~dp0FB2AccentConverter.csproj"
 set "PUBLISH_DIR=%~dp0publish"
 set "MAINWINDOW_SOURCE=%~dp0MainWindow.cs"
-set "REVIEW_SOURCE=%~dp0WordReviewWindow.xaml.cs"
+set "REVIEW_SOURCE=%~dp0MainWindow.Review.cs"
 
 if not exist "%~dp0dictionary\*.txt" (
     echo ERROR: dictionary text file is missing in "%~dp0dictionary".
@@ -20,51 +20,36 @@ if not exist "%PROJECT%" (
     set "RESULT=2"
     goto :finish
 )
-set "DEEPREADER_PROJECT="
-for /d %%D in ("%~dp0..\DeepReader_x64 V*Beta Bionic") do if exist "%%~fD\DeepReader.csproj" (
-    if defined DEEPREADER_PROJECT (
-        echo ERROR: more than one matching DeepReader project was found.
-        set "RESULT=3"
-        goto :finish
-    )
-    set "DEEPREADER_PROJECT=%%~fD\DeepReader.csproj"
-)
-if not defined DEEPREADER_PROJECT (
-    echo ERROR: no neighboring DeepReader_x64 V*Beta Bionic project was found.
-    echo Place exactly one DeepReader project next to DSR, or adjust this script.
-    set "RESULT=3"
-    goto :finish
-)
-if not exist "%DEEPREADER_PROJECT%" (
-    echo ERROR: expected DeepReader project not found: "%DEEPREADER_PROJECT%"
-    set "RESULT=3"
-    goto :finish
-)
 if not exist "%REVIEW_SOURCE%" (
-    echo ERROR: review-window source is missing: "%REVIEW_SOURCE%"
+    echo ERROR: review source is missing: "%REVIEW_SOURCE%"
     set "RESULT=6"
     goto :finish
 )
 findstr /C:"DeclensionCorrection" "%REVIEW_SOURCE%" >nul
 if errorlevel 1 (
-    echo ERROR: review-window source does not contain declension form editing.
+    echo ERROR: review source does not contain declension form editing.
     set "RESULT=6"
     goto :finish
 )
-findstr /C:"WordReviewWindow(reviewPath, output)" "%MAINWINDOW_SOURCE%" >nul
+findstr /C:"SetReviewPaths" "%MAINWINDOW_SOURCE%" >nul
 if errorlevel 1 (
-    echo ERROR: MainWindow source is missing the post-conversion review launch.
+    echo ERROR: MainWindow source is missing the post-conversion review handoff.
     set "RESULT=7"
     goto :finish
 )
 
 echo DSR project:       %PROJECT%
-echo DeepReader:        %DEEPREADER_PROJECT%
 echo Publish directory: %PUBLISH_DIR%
 echo Yo dictionary directory: %~dp0dictionary
 echo.
 
-if exist "%PUBLISH_DIR%" rmdir /s /q "%PUBLISH_DIR%"
+rem Preserve the reusable runtime data next to the exe (Cyrillic folder name "ресурсы":
+rem local Python environment + models). A plain delete would force re-downloading gigabytes
+rem after every rebuild. Move the old publish aside, then move back any top-level directory
+rem that the fresh publish did not create.
+set "OLD_PUBLISH=%~dp0publish.old"
+if exist "%OLD_PUBLISH%" rmdir /s /q "%OLD_PUBLISH%"
+if exist "%PUBLISH_DIR%" move "%PUBLISH_DIR%" "%OLD_PUBLISH%" >nul
 if errorlevel 1 (
     echo ERROR: could not clean old publish output.
     set "RESULT=4"
@@ -84,7 +69,7 @@ if errorlevel 1 (
     goto :finish
 )
 
-dotnet publish "%PROJECT%" -c Release -r win-x64 --self-contained true -p:EnableWindowsTargeting=true -p:DeepReaderProjectPath="%DEEPREADER_PROJECT%" -p:DebugType=None -p:DebugSymbols=false -o "%PUBLISH_DIR%"
+dotnet publish "%PROJECT%" -c Release -r win-x64 --self-contained true -p:EnableWindowsTargeting=true -p:DebugType=None -p:DebugSymbols=false -o "%PUBLISH_DIR%"
 set "RESULT=%ERRORLEVEL%"
 if not "%RESULT%"=="0" goto :finish
 if not exist "%PUBLISH_DIR%\DSR.exe" (
@@ -114,6 +99,16 @@ if errorlevel 1 (
     goto :finish
 )
 echo Executable smoke test passed.
+
+rem Restore directories from the previous publish that are not part of the fresh build
+rem (the runtime data folder). Names are taken from the file system, so no encoding issues.
+if exist "%OLD_PUBLISH%" (
+    if not exist "%PUBLISH_DIR%" mkdir "%PUBLISH_DIR%"
+    for /d %%D in ("%OLD_PUBLISH%\*") do (
+        if not exist "%PUBLISH_DIR%\%%~nxD" move "%%D" "%PUBLISH_DIR%\" >nul
+    )
+    rmdir /s /q "%OLD_PUBLISH%"
+)
 
 :finish
 echo.

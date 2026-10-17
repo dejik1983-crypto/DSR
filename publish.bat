@@ -3,14 +3,9 @@ setlocal EnableExtensions
 cd /d "%~dp0"
 set "PROJECT=%~dp0FB2AccentConverter.csproj"
 set "PUBLISH_DIR=%~dp0publish"
-set "DEEPREADER_PROJECT=%~dp0..\DeepReader_x64 V1.6.3Beta Bionic\DeepReader.csproj"
 if not exist "%PROJECT%" (
     echo ERROR: DSR project not found: "%PROJECT%"
     exit /b 2
-)
-if not exist "%DEEPREADER_PROJECT%" (
-    echo ERROR: DeepReader project not found: "%DEEPREADER_PROJECT%"
-    exit /b 3
 )
 if exist "%PUBLISH_DIR%" rmdir /s /q "%PUBLISH_DIR%"
 if errorlevel 1 exit /b 4
@@ -19,7 +14,7 @@ if exist "%~dp0obj" rmdir /s /q "%~dp0obj"
 if errorlevel 1 exit /b 6
 if exist "%~dp0bin" rmdir /s /q "%~dp0bin"
 if errorlevel 1 exit /b 7
-dotnet publish "%PROJECT%" -c Release -r win-x64 --self-contained true -p:EnableWindowsTargeting=true -p:DeepReaderProjectPath="%DEEPREADER_PROJECT%" -p:DebugType=None -p:DebugSymbols=false -o "%PUBLISH_DIR%"
+dotnet publish "%PROJECT%" -c Release -r win-x64 --self-contained true -p:EnableWindowsTargeting=true -p:DebugType=None -p:DebugSymbols=false -o "%PUBLISH_DIR%"
 if errorlevel 1 exit /b %errorlevel%
 if not exist "%PUBLISH_DIR%\DSR.exe" (
     echo ERROR: DSR.exe missing after publish.

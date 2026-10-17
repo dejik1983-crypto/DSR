@@ -8,7 +8,7 @@ using System.Text;
 using System.Text.Json;
 using System.Xml;
 using System.Xml.Linq;
-using DeepReader.Services;
+using FB2AccentConverter.Parser;
 
 namespace FB2AccentConverter;
 
@@ -73,6 +73,10 @@ internal static class Program
     private static readonly Lazy<ConcurrentDictionary<string, string>> UserDictionary = new(LoadUserDictionary);
     private static readonly Lazy<Dictionary<string, string>> YoDictionary = new(LoadYoDictionary);
     internal static string FormCorrectionsPathFor(string reviewPath) => Path.Combine(Path.GetDirectoryName(Path.GetFullPath(reviewPath))!, Path.GetFileNameWithoutExtension(reviewPath).Replace("_проверка-слов", "_формы") + ".json");
+
+    /// <summary>Отчёт со статистикой конвертации, который появляется рядом с результатом.</summary>
+    internal static string StatisticsPathFor(string outputPath) =>
+        Path.Combine(Path.GetDirectoryName(Path.GetFullPath(outputPath))!, Path.GetFileNameWithoutExtension(outputPath) + "_статистика.txt");
 
     // The actual accenting runs in the child python.exe worker; the window process
     // itself mostly waits on it and uses almost no CPU. The load indicators therefore
@@ -311,12 +315,13 @@ internal static class Program
 
             if (args.Length >= 2 && args[0] == "--review")
             {
-                // Прямой запуск окна проверки слов: удобно, когда книга уже сконвертирована.
+                // Прямой запуск доработки: удобно, когда книга уже сконвертирована.
+                // Открывается вкладка ИИ-доработки с подставленными файлами.
                 try
                 {
                     var book = args.Length >= 3 ? args[2] : null;
                     var application = new System.Windows.Application();
-                    application.Run(new WordReviewWindow(args[1], book));
+                    application.Run(new MainWindow(args[1], book));
                     return 0;
                 }
                 catch (Exception ex)
@@ -461,7 +466,51 @@ internal static class Program
         return destination;
     }
 
+    private static readonly object PythonEnvironmentLock = new();
+
+    /// <summary>Версия сборки: после обновления DSR окружение готовится заново.</summary>
+    internal static string AppVersion
+    {
+        get
+        {
+            var assembly = Assembly.GetExecutingAssembly();
+            var informational = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+            return string.IsNullOrWhiteSpace(informational) ? assembly.GetName().Version?.ToString() ?? "0" : informational;
+        }
+    }
+
+    /// <summary>Python из локального окружения рядом с приложением.</summary>
+    internal static string EnvironmentPythonPath => Path.Combine(DataDirectory, "python", "Scripts", "python.exe");
+
+    /// <summary>
+    /// Быстрая проверка окружения при запуске: импортируются ли пакеты. Нужна, чтобы
+    /// не пропустить перенос на другой компьютер, где окружение Python нерабочее.
+    /// </summary>
+    internal static bool VerifyEnvironmentQuick()
+    {
+        try
+        {
+            var python = EnvironmentPythonPath;
+            if (!File.Exists(python)) return false;
+            return RunCommand(python, "-c", "import ruaccent, onnxruntime; print(onnxruntime.__version__)").ExitCode == 0;
+        }
+        catch (Exception error)
+        {
+            LogError("Быстрая проверка окружения", error);
+            return false;
+        }
+    }
+
     internal static string EnsurePythonRuntime()
+    {
+        // Подготовка, проверка GPU и установка CUDA пишут в одно локальное окружение Python.
+        // Не даём им работать одновременно: параллельные pip-процессы блокируют файлы
+        // друг друга, и один из них падает с WinError 32 («файл занят другим процессом»).
+        lock (PythonEnvironmentLock)
+            return EnsurePythonRuntimeCore();
+    }
+
+    private static string EnsurePythonRuntimeCore()
     {
         Directory.CreateDirectory(DataDirectory);
         Directory.CreateDirectory(ModelCacheDirectory);
@@ -488,15 +537,97 @@ internal static class Program
         {
             SetupProgress?.Invoke("Устанавливаю RUAccent и ONNX Runtime; идёт скачивание зависимостей…");
             // Repair only required inference packages, without optional torch/crfsuite.
-            var install = RunCommand(python, "-m", "pip", "install", "--upgrade", "ruaccent @ git+https://github.com/Den4ikAI/ruaccent.git@3ac0ad5f6508f6c1a4a604220042232c70a7baf9", "onnxruntime");
+            const string accentSpec = "ruaccent @ git+https://github.com/Den4ikAI/ruaccent.git@3ac0ad5f6508f6c1a4a604220042232c70a7baf9";
+            var install = InstallPipPackages(python, pythonEnvironment, "Установка RuAccent", accentSpec, "onnxruntime");
             if (install.ExitCode != 0)
-                throw new InvalidOperationException("Не удалось установить/исправить RUAccent и ONNX Runtime. Проверьте интернет и место на диске. " + install.Output);
+            {
+                LogError("Не удалось установить RUAccent и ONNX Runtime", install.Output);
+                throw new InvalidOperationException(IsTransientFileLock(install.Output)
+                    ? "Не удалось установить RUAccent и ONNX Runtime: файлы окружения заняты другим процессом. Закройте другие окна DSR и повторите «Подготовка к работе». Журнал: " + LogFilePath
+                    : "Не удалось установить RUAccent и ONNX Runtime. Проверьте интернет и место на диске. Подробности в журнале: " + LogFilePath);
+            }
             check = RunCommand(python, "-c", "import ruaccent, onnxruntime; print('onnxruntime', onnxruntime.__version__)");
             if (check.ExitCode != 0)
                 throw new InvalidOperationException("Проверка RUAccent и ONNX Runtime не пройдена. " + check.Output);
         }
 
         return python;
+    }
+
+    // Windows на короткое время может блокировать файл окружения (антивирус, индексатор
+    // или уходящий процесс python). Такие ошибки pip обычно проходят при повторе.
+    private static bool IsTransientFileLock(string output) =>
+        output.Contains("WinError 32", StringComparison.OrdinalIgnoreCase)
+        || output.Contains("being used by another process", StringComparison.OrdinalIgnoreCase)
+        || output.Contains("занят другим процессом", StringComparison.OrdinalIgnoreCase);
+
+    // Останавливает только те процессы python, которые запущены из нашего локального
+    // окружения (ресурсы\python), чтобы не трогать посторонние установки Python.
+    private static void StopLocalEnvironmentPython(string pythonEnvironment)
+    {
+        string root;
+        try { root = Path.GetFullPath(pythonEnvironment); }
+        catch { return; }
+        foreach (var process in Process.GetProcessesByName("python"))
+        {
+            try
+            {
+                var path = process.MainModule?.FileName;
+                if (path != null && path.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+                    process.Kill(entireProcessTree: true);
+            }
+            catch { /* процесс недоступен или уже завершился */ }
+            finally { process.Dispose(); }
+        }
+    }
+
+    // Установка пакетов pip с повтором: Windows иногда на короткое время блокирует файлы
+    // окружения (антивирус, индексатор или уходящий процесс python), и первая попытка падает.
+    private static (int ExitCode, string Output) InstallPipPackages(string python, string pythonEnvironment, string label, params string[] packages)
+    {
+        var install = (ExitCode: 1, Output: string.Empty);
+        for (var attempt = 1; attempt <= 3; attempt++)
+        {
+            // Оставшийся от прерванной подготовки Python держит файлы в site-packages.
+            // Останавливаем только процессы из нашего локального окружения.
+            StopLocalEnvironmentPython(pythonEnvironment);
+            var arguments = new List<string> { "-m", "pip", "install", "--upgrade" };
+            arguments.AddRange(packages);
+            install = RunCommand(python, arguments.ToArray());
+            if (install.ExitCode == 0) break;
+            if (attempt < 3 && IsTransientFileLock(install.Output))
+            {
+                SetupProgress?.Invoke($"{label}: файлы окружения заняты, повтор ({attempt + 1}/3)…");
+                Thread.Sleep(TimeSpan.FromSeconds(3 * attempt));
+                continue;
+            }
+            break;
+        }
+        return install;
+    }
+
+    // Локальная модель ИИ работает через onnxruntime-genai. Пакет тяжёлый и не входит в базовую
+    // подготовку, поэтому ставим его при первом использовании локального движка подсказок.
+    internal static string? EnsureLlmRuntimeOrError(string python)
+    {
+        lock (PythonEnvironmentLock)
+        {
+            var check = RunCommand(python, "-c", "import onnxruntime_genai; print('ok')");
+            if (check.ExitCode == 0) return null;
+            SetupProgress?.Invoke("Устанавливаю onnxruntime-genai для локальной модели ИИ…");
+            var install = InstallPipPackages(python, Path.Combine(DataDirectory, "python"),
+                "Установка onnxruntime-genai", "onnxruntime-genai");
+            if (install.ExitCode != 0)
+            {
+                LogError("Не удалось установить onnxruntime-genai", install.Output);
+                return "Не удалось установить пакет onnxruntime-genai для локальной модели ИИ. "
+                    + (IsTransientFileLock(install.Output)
+                        ? "Файлы окружения заняты другим процессом — закройте другие окна DSR и повторите."
+                        : "Проверьте интернет и место на диске. Журнал: " + LogFilePath);
+            }
+            check = RunCommand(python, "-c", "import onnxruntime_genai; print('ok')");
+            return check.ExitCode == 0 ? null : "Пакет onnxruntime-genai установлен, но не загружается. " + check.Output;
+        }
     }
 
     internal static string InstallGpuRuntime()
@@ -2093,6 +2224,13 @@ internal static class Program
         {
             script = ExtractEmbeddedFile("DSR.llm_stress_worker.py", "llm_stress_worker.py");
             python = EnsurePythonRuntime();
+            // Локальная модель ONNX требует пакет onnxruntime-genai — доустанавливаем его здесь.
+            if (chosen.IsLocal)
+            {
+                var runtimeError = EnsureLlmRuntimeOrError(python);
+                if (runtimeError != null)
+                    return LlmStressOutcome.Fail(runtimeError, items.Count);
+            }
         }
         catch (Exception error)
         {

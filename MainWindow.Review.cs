@@ -6,17 +6,22 @@ using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
+using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Threading;
 
 namespace FB2AccentConverter;
 
-public sealed partial class WordReviewWindow : Window
+/// <summary>
+/// Доработка после конвертации: подсказки ИИ и ручная доводка ударений и опечаток.
+/// Раньше это было отдельное окно; теперь — вкладки 2 и 3 главного окна MainWindow.
+/// </summary>
+public sealed partial class MainWindow
 {
     private string? _reviewPath;
     private string? _outputPath;
     private readonly List<MutableReviewEntry> _entries = new();
-    private readonly List<RadioButton> _vowels = new();
     private readonly List<TextBox> _declensions = new();
     private Dictionary<string, int> _wordCounts = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string> _llmSuggestions = new(StringComparer.Ordinal);
@@ -28,10 +33,23 @@ public sealed partial class WordReviewWindow : Window
     private int _selectedSampleIndex = -1;
     private bool _rebuildingSamples;
     private bool _updatingCorrection;
+    // Текущее написание слова без знака ударения. Именно к нему привязываются кнопки
+    // ударных гласных, поэтому исправление опечатки и расстановка ударения работают вместе.
+    private string _workingWord = string.Empty;
+    // Большой редактор фрагмента: проверяемое слово — жирный Run внутри текста.
+    private Run? _wordRun;
+    private bool _updatingFragment;
+    private bool _wordEditFromEditor;
+    private string _fragmentBefore = string.Empty;
+    private string _fragmentAfter = string.Empty;
+    private double _reviewFontSize = 16;
 
-    internal WordReviewWindow(string? reviewPath = null, string? outputPath = null)
+    /// <summary>
+    /// Настраивает элементы вкладок 2–3. Вызывается один раз из конструктора MainWindow
+    /// после InitializeComponent. Пути можно передать сразу (режим --review) или позже.
+    /// </summary>
+    internal void InitializeReview(string? reviewPath = null, string? outputPath = null)
     {
-        InitializeComponent();
         _reviewPath = reviewPath;
         _outputPath = outputPath;
         SortModeComboBox.ItemsSource = new[] { "По алфавиту", "По частоте в тексте" };
@@ -60,13 +78,60 @@ public sealed partial class WordReviewWindow : Window
         AddFormButton.Click += AddForm_Click;
         SaveCorrectionButton.Click += SaveCorrection_Click;
         ConfirmStressButton.Click += ConfirmStress_Click;
+        ResetWordButton.Click += ResetToOriginalWord_Click;
+        // Большой редактор: слово правится прямо в тексте, кнопки ударения — крупные.
+        FragmentEditor.TextChanged += FragmentEditor_TextChanged;
+        FontLargerButton.Click += (_, _) => ChangeReviewFontSize(2);
+        FontSmallerButton.Click += (_, _) => ChangeReviewFontSize(-2);
         LlmCheckButton.Click += LlmCheck_Click;
+        UnrecognizedWordsListBox.MouseDoubleClick += (_, _) => JumpToManualReview();
         InitializeLlmEngines();
         PreviewKeyDown += HandleReviewNavigationKey;
         WordGroupsListBox.PreviewKeyDown += HandleReviewNavigationKey;
         ContextsListBox.PreviewKeyDown += HandleReviewNavigationKey;
         if (_reviewPath != null && File.Exists(_reviewPath)) LoadReviewFiles();
         else UpdateEditorEnabled();
+    }
+
+    /// <summary>Подставляет файлы отчёта и результата и загружает их в редактор.</summary>
+    internal void SetReviewPaths(string? reviewPath, string? outputPath)
+    {
+        if (!string.IsNullOrWhiteSpace(reviewPath)) { _reviewPath = reviewPath; ReviewFileTextBox.Text = reviewPath!; }
+        if (!string.IsNullOrWhiteSpace(outputPath)) { _outputPath = outputPath; Fb2FileTextBox.Text = outputPath!; }
+        if (_reviewPath != null && File.Exists(_reviewPath)) LoadReviewFiles();
+        else { RefreshWordCounts(); ApplyReviewItems(); UpdateEditorEnabled(); }
+    }
+
+    /// <summary>Обновляет оба списка слов: полный (вкладка 3) и краткий (вкладка 2).</summary>
+    private void ApplyReviewItems()
+    {
+        WordGroupsListBox.ItemsSource = BuildReviewItems();
+        UnrecognizedWordsListBox.ItemsSource = BuildUnrecognizedItems();
+    }
+
+    // Краткий список нераспознанных слов для вкладки ИИ: без поиска, всегда по частоте.
+    private List<ReviewItem> BuildUnrecognizedItems() =>
+        _entries.Select((entry, index) => (entry, index))
+            .GroupBy(pair => ExactWordKey(pair.entry.Word), StringComparer.Ordinal)
+            .Select(group =>
+            {
+                var first = group.First();
+                var count = _wordCounts.TryGetValue(first.entry.Word, out var found) ? found : 0;
+                var hint = _llmSuggestions.ContainsKey(ExactWordKey(first.entry.Word)) ? "  ·  есть подсказка ИИ" : "";
+                return new ReviewItem(first.index, $"{first.entry.Word} — {count:N0} вхождений{hint}", first.entry.Word, count);
+            })
+            .OrderByDescending(item => item.Count)
+            .ThenBy(item => item.Word, StringComparer.CurrentCultureIgnoreCase)
+            .ToList();
+
+    // Двойной щелчок по слову в кратком списке открывает его на вкладке ручной доводки.
+    private void JumpToManualReview()
+    {
+        if (UnrecognizedWordsListBox.SelectedItem is not ReviewItem item) return;
+        ReviewTabs.SelectedIndex = 2;
+        var found = WordGroupsListBox.Items.Cast<ReviewItem>()
+            .FirstOrDefault(candidate => ExactWordKey(candidate.Word) == ExactWordKey(item.Word));
+        if (found != null) { WordGroupsListBox.SelectedItem = found; WordGroupsListBox.ScrollIntoView(found); }
     }
 
     private void RefreshWordCounts()
@@ -103,7 +168,7 @@ public sealed partial class WordReviewWindow : Window
     private void RebuildGroupList()
     {
         var selectedWord = (WordGroupsListBox.SelectedItem as ReviewItem)?.Word;
-        WordGroupsListBox.ItemsSource = BuildReviewItems();
+        ApplyReviewItems();
         if (selectedWord != null)
         {
             var found = WordGroupsListBox.Items.Cast<ReviewItem>().FirstOrDefault(item => ExactWordKey(item.Word) == ExactWordKey(selectedWord));
@@ -129,7 +194,7 @@ public sealed partial class WordReviewWindow : Window
         _outputPath = dialog.FileName;
         Fb2FileTextBox.Text = _outputPath;
         RefreshWordCounts();
-        WordGroupsListBox.ItemsSource = BuildReviewItems();
+        ApplyReviewItems();
         UpdateEditorEnabled();
     }
 
@@ -530,10 +595,14 @@ public sealed partial class WordReviewWindow : Window
         _ => reason,
     };
 
-    // Небольшое немодальное окно: показывает, что делает модель, и позволяет прервать проход.
+    // Небольшое немодальное окно: показывает, что делает модель, позволяет прервать проход
+    // и раз в секунду выводит нагрузку на процессор, память и видеокарту.
     private sealed class LlmProgressWindow : Window
     {
         private readonly TextBlock _status;
+        private readonly TextBlock _load;
+        private readonly DispatcherTimer _timer;
+        private readonly LoadMonitor _monitor = new();
         private readonly CancellationTokenSource _cancellation = new();
 
         public CancellationToken Token => _cancellation.Token;
@@ -555,6 +624,14 @@ public sealed partial class WordReviewWindow : Window
             panel.Children.Add(new ProgressBar { IsIndeterminate = true, Height = 6, Margin = new Thickness(0, 14, 0, 8) });
             _status = new TextBlock { Text = "Запускаю модель…", TextWrapping = TextWrapping.Wrap };
             panel.Children.Add(_status);
+            _load = new TextBlock
+            {
+                Text = "Нагрузка: считаю…",
+                Margin = new Thickness(0, 10, 0, 0),
+                TextWrapping = TextWrapping.Wrap,
+                Foreground = new SolidColorBrush(Color.FromRgb(0x6B, 0x5A, 0x45)),
+            };
+            panel.Children.Add(_load);
             var cancel = new Button
             {
                 Content = "Прервать",
@@ -565,12 +642,24 @@ public sealed partial class WordReviewWindow : Window
             cancel.Click += (_, _) => { _cancellation.Cancel(); _status.Text = "Прерываю…"; };
             panel.Children.Add(cancel);
             Content = panel;
+
+            // Мониторинг нагрузки: обновляем раз в секунду, пока идёт проход.
+            _timer = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromSeconds(1) };
+            _timer.Tick += (_, _) =>
+            {
+                if (!IsLoaded) return;
+                try { _load.Text = "Нагрузка: " + _monitor.Describe(); }
+                catch { /* мониторинг не критичен для прохода */ }
+            };
+            _timer.Start();
         }
 
         public void SetStatus(string message) => _status.Text = message;
 
         protected override void OnClosed(EventArgs e)
         {
+            _timer.Stop();
+            _monitor.Dispose();
             _cancellation.Cancel();
             base.OnClosed(e);
         }
@@ -628,7 +717,7 @@ public sealed partial class WordReviewWindow : Window
             RefreshWordCounts();
             _selectedGroupAnchor = -1;
             _selectedSampleIndex = -1;
-            WordGroupsListBox.ItemsSource = BuildReviewItems();
+            ApplyReviewItems();
             FileStatusTextBlock.Text = _entries.Count == 0 ? "Отчёт пуст или не содержит слов для проверки." : $"Загружено случаев: {_entries.Count}; точных групп слов: {WordGroupsListBox.Items.Count}. Сортировка: {SortModeComboBox.SelectedItem}.";
             WordGroupsListBox.Focusable = true;
             WordGroupsListBox.IsTabStop = true;
@@ -645,8 +734,142 @@ public sealed partial class WordReviewWindow : Window
         if (_updatingCorrection || WordGroupsListBox.SelectedItem is not ReviewItem selected || selected.Index >= _entries.Count) return;
         var corrected = CorrectionTextBox.Text;
         foreach (var entry in GetSelectedGroup()) entry.Proposed = corrected;
-        ContextTextBlock.Text = "Правка применяется ко всей выбранной группе. Снимите галочку у образца, чтобы оставить его без изменений.";
+        // Если изменились буквы (исправили опечатку), кнопки ударных гласных должны
+        // отражать новое написание, иначе ударение ставилось бы на исходное слово и стирало правку.
+        var letters = PlainLetters(corrected);
+        var lettersChanged = !string.Equals(letters, _workingWord, StringComparison.OrdinalIgnoreCase);
+        _workingWord = letters;
+        if (lettersChanged)
+        {
+            _updatingCorrection = true;
+            RebuildVowelChoices();
+            _updatingCorrection = false;
+            ContextTextBlock.Text = "Написание изменено (исправление опечатки). Теперь выберите ударную гласную — ударение встанет на исправленное слово.";
+        }
+        else
+        {
+            ContextTextBlock.Text = "Правка применяется ко всей выбранной группе. Снимите галочку у образца, чтобы оставить его без изменений.";
+        }
+        // Отражение правки в большом редакторе. Если текст ввели прямо там, обновлять не нужно.
+        if (!_wordEditFromEditor) UpdateEditorWord();
     }
+
+    private static string PlainLetters(string word) => word.Replace("\u0301", string.Empty);
+
+    // Сравнение букв без учёта ударения и замены е↔ё: только реальная правка опечатки
+    // считается изменением написания и вызывает вопрос «сохранить?».
+    private static bool SameLettersApartFromYo(string left, string right) =>
+        FoldLetters(left).Equals(FoldLetters(right), StringComparison.Ordinal);
+
+    private static string FoldLetters(string value) =>
+        value.Replace("\u0301", string.Empty).Replace('ё', 'е').Replace('Ё', 'Е').ToLowerInvariant();
+
+    // Текст большого редактора: «до» + проверяемое слово (жирным, с ударением) + «после».
+    private void RenderFragment(string before, string word, string after)
+    {
+        _fragmentBefore = before;
+        _fragmentAfter = after;
+        _updatingFragment = true;
+        try
+        {
+            var paragraph = new Paragraph { Margin = new Thickness(0) };
+            paragraph.Inlines.Add(new Run(before));
+            _wordRun = new Run(word)
+            {
+                // Проверяемое слово должно сразу бросаться в глаза: крупнее, жирнее и с подсветкой.
+                FontWeight = FontWeights.Black,
+                FontSize = ReviewWordFontSize,
+                Foreground = TryFindResource("Accent") as Brush ?? Brushes.SaddleBrown,
+                Background = new SolidColorBrush(Color.FromRgb(0xFF, 0xF3, 0xD6)),
+            };
+            paragraph.Inlines.Add(_wordRun);
+            paragraph.Inlines.Add(new Run(after));
+            FragmentEditor.Document.Blocks.Clear();
+            FragmentEditor.Document.Blocks.Add(paragraph);
+            FragmentEditor.FontSize = _reviewFontSize;
+        }
+        finally
+        {
+            _updatingFragment = false;
+        }
+    }
+
+    // Слово — это жирный фрагмент текста. Если пользователь стёр его целиком, ищем любой жирный Run.
+    private Run? CurrentWordRun()
+    {
+        if (_wordRun is { Parent: not null }) return _wordRun;
+        var found = FragmentEditor.Document.Blocks.OfType<Paragraph>()
+            .SelectMany(paragraph => paragraph.Inlines.OfType<Run>())
+            .FirstOrDefault(run => run.FontWeight == FontWeights.Bold);
+        if (found != null) _wordRun = found;
+        return found;
+    }
+
+    private void UpdateEditorWord()
+    {
+        var wordRun = CurrentWordRun();
+        if (wordRun == null) return;
+        if (string.Equals(wordRun.Text, CorrectionTextBox.Text, StringComparison.Ordinal)) return;
+        _updatingFragment = true;
+        try { wordRun.Text = CorrectionTextBox.Text; }
+        finally { _updatingFragment = false; }
+    }
+
+    private string DocumentText() =>
+        new TextRange(FragmentEditor.Document.ContentStart, FragmentEditor.Document.ContentEnd).Text.TrimEnd('\r', '\n');
+
+    // Слово — это текст между сохранёнными частями «до» и «после». Если контекст стёрли
+    // (например, выделили всё и напечатали заново), словом считается весь оставшийся
+    // текст, если это одно слово без пробелов. Перерисовки нет, чтобы не сбивать ввод.
+    private string ExtractWordFromDocument(string doc)
+    {
+        if (doc.Length >= _fragmentBefore.Length + _fragmentAfter.Length
+            && doc.StartsWith(_fragmentBefore, StringComparison.Ordinal)
+            && doc.EndsWith(_fragmentAfter, StringComparison.Ordinal))
+            return doc.Substring(_fragmentBefore.Length, doc.Length - _fragmentBefore.Length - _fragmentAfter.Length);
+        var trimmed = doc.Trim();
+        return trimmed.Length > 0 && !trimmed.Any(char.IsWhiteSpace) ? trimmed : string.Empty;
+    }
+
+    private void FragmentEditor_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (_updatingFragment) return;
+        var text = ExtractWordFromDocument(DocumentText());
+        if (string.IsNullOrEmpty(text)) return;
+        if (string.Equals(text, CorrectionTextBox.Text, StringComparison.Ordinal)) return;
+        // Написание ввели прямо в тексте — переносим его в рабочее поле (источник правки).
+        // Редактор при этом не трогаем, чтобы не сбивать позицию курсора.
+        _wordEditFromEditor = true;
+        try { CorrectionTextBox.Text = text; }
+        finally { _wordEditFromEditor = false; }
+    }
+
+    // Полный фрагмент выбранного образца переносится в редактор целиком.
+    private void RenderSelectedSample()
+    {
+        if (WordGroupsListBox.SelectedItem is not ReviewItem selected || selected.Index < 0 || selected.Index >= _entries.Count) return;
+        var wordKey = ExactWordKey(_entries[selected.Index].Word);
+        var index = _selectedSampleIndex;
+        if (index < 0 || index >= _entries.Count || ExactWordKey(_entries[index].Word) != wordKey)
+            index = _entries.FindIndex(entry => ExactWordKey(entry.Word) == wordKey);
+        if (index < 0) return;
+        var entry = _entries[index];
+        var sample = SampleItem.For(index, entry.Context, entry.Word, entry.Included);
+        var word = CorrectionTextBox.Text.Length > 0 ? CorrectionTextBox.Text : DefaultInitialStress(entry.Word);
+        RenderFragment(sample.Before, word, sample.After);
+    }
+
+    private void ChangeReviewFontSize(double delta)
+    {
+        _reviewFontSize = Math.Clamp(_reviewFontSize + delta, 11, 34);
+        FragmentEditor.FontSize = _reviewFontSize;
+        if (_wordRun != null) _wordRun.FontSize = ReviewWordFontSize;
+        WordGroupsListBox.FontSize = Math.Max(11, _reviewFontSize - 2);
+        ContextsListBox.FontSize = Math.Max(11, _reviewFontSize - 2);
+    }
+
+    /// <summary>Проверяемое слово в тексте всегда крупнее окружающего текста.</summary>
+    private double ReviewWordFontSize => Math.Round(_reviewFontSize * 1.3, 1);
 
     private IEnumerable<MutableReviewEntry> GetSelectedGroup()
     {
@@ -738,6 +961,11 @@ public sealed partial class WordReviewWindow : Window
             if (edited.Count > 0) ReloadReviewEntries();
             UpdateEditorEnabled();
             FileStatusTextBlock.Text = $"Пакетная правка применена.\nФайл: {_outputPath}\nГрупп слов: {edited.Count}; сохранённых словоформ к применению: {savedForms.Count}; заменено вхождений: {replacements}.";
+            OfferToOpenResultFolders("Правки применены.",
+                _outputPath,
+                Program.FormCorrectionsPathFor(_reviewPath!),
+                StatisticsPath,
+                InputTextBox.Text);
         }
         catch (OperationCanceledException) { }
         catch (Exception ex)
@@ -747,6 +975,50 @@ public sealed partial class WordReviewWindow : Window
             Program.LogReview("Пакет правок не применён: " + ex.Message);
             ShowApplyError(ex, edited);
         }
+    }
+
+    /// <summary>Отчёт со статистикой: путь известен сразу после выбора результата конвертации.</summary>
+    private string? StatisticsPath => !string.IsNullOrWhiteSpace(OutputTextBox.Text)
+        ? Program.StatisticsPathFor(OutputTextBox.Text)
+        : _diagnosticsPath;
+
+    /// <summary>
+    /// После применения правок предлагаем открыть папки с результатами. Если все созданные
+    /// и обработанные файлы (и исходник) лежат в одной папке — открываем её один раз;
+    /// иначе открываем каждую из папок.
+    /// </summary>
+    private void OfferToOpenResultFolders(string title, params string?[] files)
+    {
+        var folders = new List<string>();
+        foreach (var file in files)
+        {
+            if (string.IsNullOrWhiteSpace(file)) continue;
+            string? directory;
+            try { directory = Path.GetDirectoryName(Path.GetFullPath(file)); }
+            catch { continue; }
+            if (!string.IsNullOrEmpty(directory) && !folders.Any(existing => string.Equals(existing, directory, StringComparison.OrdinalIgnoreCase)))
+                folders.Add(directory);
+        }
+        if (folders.Count == 0) return;
+        if (folders.Count == 1)
+        {
+            if (MessageBox.Show(this, title + "\n\nОткрыть папку с результатом?\n" + folders[0],
+                    "Готово", MessageBoxButton.YesNo, MessageBoxImage.Information) == MessageBoxResult.Yes)
+                OpenFolder(folders[0]);
+            return;
+        }
+        var list = string.Join("\n", folders.Select((folder, index) => "  " + (index + 1) + ". " + folder));
+        if (MessageBox.Show(this,
+                title + "\n\nСозданные и обработанные файлы оказались в разных папках:\n\n" + list + "\n\nОткрыть все эти папки?",
+                "Готово", MessageBoxButton.YesNo, MessageBoxImage.Information) != MessageBoxResult.Yes)
+            return;
+        foreach (var folder in folders) OpenFolder(folder);
+    }
+
+    private static void OpenFolder(string folder)
+    {
+        try { Process.Start(new ProcessStartInfo("explorer.exe", "\"" + folder + "\"") { UseShellExecute = true }); }
+        catch (Exception error) { Program.LogError("Открытие папки " + folder, error); }
     }
 
     private void ShowApplyError(Exception ex, List<(MutableReviewEntry Entry, string Correction, MutableReviewEntry[] Group)> edited)
@@ -777,7 +1049,7 @@ public sealed partial class WordReviewWindow : Window
         _entries.Clear();
         _entries.AddRange(Program.ReadWordReview(_reviewPath!).Select(entry => new MutableReviewEntry(entry)));
         RefreshWordCounts();
-        WordGroupsListBox.ItemsSource = BuildReviewItems();
+        ApplyReviewItems();
         var restored = selectedWord == null ? null : WordGroupsListBox.Items.Cast<ReviewItem>().FirstOrDefault(item => ExactWordKey(item.Word) == ExactWordKey(selectedWord));
         if (restored != null) WordGroupsListBox.SelectedItem = restored;
         else if (WordGroupsListBox.Items.Count > 0) WordGroupsListBox.SelectedIndex = 0;
@@ -787,7 +1059,6 @@ public sealed partial class WordReviewWindow : Window
             StressChoicesPanel.Children.Clear();
             DeclensionRowsPanel.Children.Clear();
             _declensions.Clear();
-            _vowels.Clear();
             CorrectionTextBox.Text = string.Empty;
             ContextTextBlock.Text = "Все группы обработаны — список слов пуст.";
         }
@@ -904,12 +1175,14 @@ public sealed partial class WordReviewWindow : Window
         LlmHintTextBlock.Text = hint;
         LlmHintPanel.Visibility = hint.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
         StressChoicesPanel.Children.Clear();
-        _vowels.Clear();
         DeclensionRowsPanel.Children.Clear();
         _declensions.Clear();
-        RebuildVowelChoices(selectedEntry);
+        _workingWord = PlainLetters(CorrectionTextBox.Text);
+        RebuildVowelChoices();
+        OriginalWordTextBlock.Text = $"Исходное слово: {selectedEntry.Word}";
         LoadSavedForms(selectedEntry);
         if (_declensions.Count == 0) AddDeclensionRow(selectedEntry.Word);
+        RenderSelectedSample();
         UpdateNavigationState();
         UpdateEditorEnabled();
     }
@@ -931,7 +1204,7 @@ public sealed partial class WordReviewWindow : Window
             e.Handled = true;
             return;
         }
-        if (CorrectionTextBox.IsKeyboardFocusWithin || DeclensionRowsPanel.IsKeyboardFocusWithin) return;
+        if (CorrectionTextBox.IsKeyboardFocusWithin || FragmentEditor.IsKeyboardFocusWithin || DeclensionRowsPanel.IsKeyboardFocusWithin) return;
         if (e.Key == Key.Left) { NavigateGroup(-1); e.Handled = true; return; }
         if (e.Key == Key.Right) { NavigateGroup(1); e.Handled = true; return; }
         if (e.Key is not (Key.Up or Key.Down) || !ContextsListBox.IsKeyboardFocusWithin || ContextsListBox.Items.Count == 0) return;
@@ -949,6 +1222,7 @@ public sealed partial class WordReviewWindow : Window
         SelectionCountTextBlock.Text = $"Включено образцов: {group.Count(item => item.Included)} из {group.Length}";
         var selected = ContextsListBox.Items.Cast<SampleItem>().FirstOrDefault(sample => sample.Index == entryIndex);
         if (selected != null && !ReferenceEquals(ContextsListBox.SelectedItem, selected)) ContextsListBox.SelectedItem = selected;
+        RenderSelectedSample();
     }
 
     private void SetSampleIncluded(int index, bool included)
@@ -999,47 +1273,132 @@ public sealed partial class WordReviewWindow : Window
         return word.Insert(position + 1, "\u0301");
     }
 
-    private void RebuildVowelChoices(MutableReviewEntry entry)
+    private const string Vowels = "аеёиоуыэюя";
+
+    // Всё слово крупными стилизованными буквами; кликабельны только гласные.
+    private void RebuildVowelChoices()
     {
-        var row = new WrapPanel { Margin = new Thickness(0, 4, 0, 4) };
-        row.Children.Add(new TextBlock { Text = "Ударная гласная: ", VerticalAlignment = VerticalAlignment.Center });
-        foreach (var (vowel, position) in entry.Word.Select((ch, index) => (ch, index)).Where(item => "аеёиоуыэюяАЕЁИОУЫЭЮЯ".Contains(item.ch)))
+        StressChoicesPanel.Children.Clear();
+        var word = _workingWord;
+        if (string.IsNullOrEmpty(word))
         {
-            if (char.ToLowerInvariant(vowel) == 'ё')
+            StressChoicesPanel.Children.Add(new TextBlock
             {
-                row.Children.Add(new TextBlock { Text = "ё (ударная)", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(5, 0, 5, 0), Foreground = Brushes.DarkGreen });
+                Text = "Выберите слово в списке слева.",
+                VerticalAlignment = VerticalAlignment.Center,
+                Foreground = TryFindResource("MutedInk") as Brush ?? Brushes.Gray
+            });
+            return;
+        }
+        var accentPosition = CorrectionTextBox.Text.IndexOf('\u0301') - 1;
+        foreach (var (letter, position) in word.Select((ch, index) => (ch, index)))
+        {
+            var lower = char.ToLowerInvariant(letter);
+            if (!Vowels.Contains(lower))
+            {
+                StressChoicesPanel.Children.Add(WordLetter(letter.ToString(), null, isVowel: false, isStressed: false, null, null));
                 continue;
             }
-            var choice = new RadioButton { Content = vowel.ToString(), GroupName = "stress-vowel", Margin = new Thickness(4), Tag = position, ToolTip = "Поставить ударение на эту гласную" };
-            choice.Checked += (_, _) => UpdateCorrectionFromSelectedVowel(entry.Word);
-            _vowels.Add(choice);
-            row.Children.Add(choice);
-            if (char.ToLowerInvariant(vowel) == 'е')
+            var captured = position;
+            if (lower == 'ё')
             {
-                var yo = new Button { Content = "ё", Padding = new Thickness(6, 1, 6, 1), Margin = new Thickness(0, 1, 5, 1), ToolTip = "Заменить эту е на ё" };
-                yo.Click += (_, _) => SetCorrectionToYo(entry.Word, position);
-                row.Children.Add(yo);
+                // «ё» всегда ударная: клик по ней возвращает «е», чтобы можно было
+                // поставить обычное ударение (см. ApplyVowelClick).
+                StressChoicesPanel.Children.Add(WordLetter(letter.ToString(), null, isVowel: true, isStressed: true,
+                    "Ё всегда ударная. Клик вернёт «е», чтобы можно было поставить обычное ударение.",
+                    () => ApplyVowelClick(captured)));
+                continue;
             }
-        }
-        StressChoicesPanel.Children.Add(row);
-        var currentPosition = CorrectionTextBox.Text.IndexOf('\u0301') - 1;
-        var current = _vowels.FirstOrDefault(choice => choice.Tag is int index && index == currentPosition);
-        if (current != null)
-        {
-            _updatingCorrection = true;
-            current.IsChecked = true;
-            _updatingCorrection = false;
+            StressChoicesPanel.Children.Add(WordLetter(letter.ToString(), "\u00b4", isVowel: true, isStressed: accentPosition == position,
+                lower == 'е'
+                    ? "Клик — ударение на эту «е». Ещё клик — «ё». Третий клик — «е» без ударения."
+                    : "Клик — поставить ударение на эту гласную. Ещё клик — снять ударение.",
+                () => ApplyVowelClick(captured)));
         }
     }
 
-        private void UpdateCorrectionFromSelectedVowel(string word)
+    private UIElement WordLetter(string glyph, string? mark, bool isVowel, bool isStressed, string? tooltip, Action? click)
+    {
+        var accent = TryFindResource("Accent") as Brush ?? Brushes.SaddleBrown;
+        var muted = TryFindResource("MutedInk") as Brush ?? Brushes.Gray;
+        var ink = TryFindResource("Ink") as Brush ?? Brushes.Black;
+        var box = new StackPanel { Margin = new Thickness(1, 0, 1, 0) };
+        // Знак ударения над ударной гласной: видно, где оно стоит, не читая слово целиком.
+        box.Children.Add(new TextBlock
+        {
+            Text = mark != null && isStressed ? mark : " ",
+            FontSize = 13,
+            Height = 15,
+            TextAlignment = TextAlignment.Center,
+            Foreground = isStressed ? accent : Brushes.Transparent,
+        });
+        box.Children.Add(new TextBlock
+        {
+            Text = glyph,
+            FontSize = 32,
+            // Шрифт тот же, что и в окне редактирования фрагмента.
+            FontWeight = isStressed ? FontWeights.Bold : FontWeights.Normal,
+            Foreground = isStressed ? accent : isVowel ? ink : muted,
+        });
+        if (click == null)
+        {
+            box.ToolTip = tooltip;
+            return box;
+        }
+        var button = new Button { Content = box, ToolTip = tooltip, Style = TryFindResource("LetterButton") as Style };
+        if (isStressed)
+        {
+            button.BorderBrush = accent;
+            button.BorderThickness = new Thickness(1.5);
+        }
+        button.Click += (_, _) => click();
+        return button;
+    }
+
+    // Клик по гласной: «е» ходит по кругу «ударная → ё → без ударения», остальные гласные
+    // просто ставят и снимают ударение. Клик по другой гласной переносит ударение туда.
+    private void ApplyVowelClick(int position)
     {
         if (_updatingCorrection) return;
-        var selected = _vowels.FirstOrDefault(choice => choice.IsChecked == true);
-        if (selected?.Tag is not int index) return;
-        var plainWord = word.Replace("\u0301", "");
-        if (index >= plainWord.Length || !"аеёиоуыэюяАЕЁИОУЫЭЮЯ".Contains(plainWord[index]) || char.ToLowerInvariant(plainWord[index]) == 'ё') return;
-        CorrectionTextBox.Text = plainWord.Insert(index + 1, "\u0301");
+        var word = _workingWord;
+        if (position < 0 || position >= word.Length) return;
+        var lower = char.ToLowerInvariant(word[position]);
+        if (!Vowels.Contains(lower)) return;
+        var accentPosition = CorrectionTextBox.Text.IndexOf('\u0301') - 1;
+
+        if (lower == 'ё')
+        {
+            // Возврат «е»: без «ё» можно поставить обычное ударение на любую гласную.
+            var yoLetters = word.ToCharArray();
+            yoLetters[position] = char.IsUpper(yoLetters[position]) ? 'Е' : 'е';
+            SetWorkingCorrection(new string(yoLetters), "«ё» заменена на «е» — теперь можно поставить обычное ударение.");
+            return;
+        }
+        if (accentPosition < 0 && word.Any(ch => char.ToLowerInvariant(ch) == 'ё'))
+        {
+            FileStatusTextBlock.Text = "В слове есть «ё» — оно и есть ударная гласная. Кликните по «ё», чтобы вернуть «е» и поставить обычное ударение.";
+            return;
+        }
+
+        string next;
+        if (accentPosition != position) next = word.Insert(position + 1, "\u0301"); // поставили ударение
+        else if (lower == 'е') // «е́» → «ё»
+        {
+            var yoLetters = word.ToCharArray();
+            yoLetters[position] = char.IsUpper(yoLetters[position]) ? 'Ё' : 'ё';
+            next = new string(yoLetters);
+        }
+        else next = word; // сняли ударение
+        SetWorkingCorrection(next, string.Empty);
+    }
+
+    private void SetWorkingCorrection(string value, string note)
+    {
+        CorrectionTextBox.Text = value;
+        // Знак ударения буквы не меняет, поэтому панель перестраиваем всегда.
+        _workingWord = PlainLetters(value);
+        RebuildVowelChoices();
+        if (note.Length > 0) FileStatusTextBlock.Text = note;
     }
 
     // Кнопка «Да» у поля правки: текущий вариант принимается как есть (даже если это
@@ -1057,6 +1416,18 @@ public sealed partial class WordReviewWindow : Window
         var proposed = CorrectionTextBox.Text.Trim().Replace("ё\u0301", "ё", StringComparison.OrdinalIgnoreCase);
         // Пустое поле тоже принимается: тогда используется ударение, показанное подсказкой.
         if (proposed.Length == 0) proposed = DefaultInitialStress(entry.Word);
+        // Правка букв (исправление опечатки) — предлагаем сохранить её или нет.
+        if (!SameLettersApartFromYo(proposed, entry.Word))
+        {
+            var answer = MessageBox.Show(this,
+                $"Написание слова изменено.\n\nбыло: {entry.Word}\nстало: {PlainLetters(proposed)}\n\nСохранить исправленное написание?",
+                "Исправление написания", MessageBoxButton.YesNo, MessageBoxImage.Question);
+            if (answer != MessageBoxResult.Yes)
+            {
+                FileStatusTextBlock.Text = "Исправленное написание не сохранено: в правке осталось исходное слово.";
+                return;
+            }
+        }
         if (!Program.IsValidCorrection(entry.Word, proposed) && !Program.IsValidTypoCorrection(entry.Word, proposed))
         {
             MessageBox.Show(this, "Не удалось подтвердить правку: в поле должно стоять то же слово с одним знаком ударения, слово с «ё» либо исправленная опечатка (не более 3 отличий от исходного слова).", "Проверьте правку", MessageBoxButton.OK, MessageBoxImage.Warning);
@@ -1069,13 +1440,22 @@ public sealed partial class WordReviewWindow : Window
         NavigateGroup(1);
     }
 
-    private void SetCorrectionToYo(string word, int position)
+    // Возврат к исходному слову из книги: снимает исправление написания (опечатки),
+    // которое пользователь мог внести вручную.
+    private void ResetToOriginalWord_Click(object sender, RoutedEventArgs e)
     {
-        var plainWord = word.Replace("\u0301", "");
-        if (position < 0 || position >= plainWord.Length || char.ToLowerInvariant(plainWord[position]) != 'е') return;
-        var chars = plainWord.ToCharArray();
-        chars[position] = char.IsUpper(chars[position]) ? 'Ё' : 'ё';
-        CorrectionTextBox.Text = new string(chars);
+        if (WordGroupsListBox.SelectedItem is not ReviewItem selected || selected.Index >= _entries.Count) return;
+        var entry = _entries[selected.Index];
+        var restored = DefaultInitialStress(entry.Word);
+        _updatingCorrection = true;
+        CorrectionTextBox.Text = restored;
+        _workingWord = PlainLetters(entry.Word);
+        RebuildVowelChoices();
+        _updatingCorrection = false;
+        foreach (var item in GetSelectedGroup()) item.Proposed = restored;
+        OriginalWordTextBlock.Text = $"Исходное слово: {entry.Word}";
+        ContextTextBlock.Text = "Написание возвращено к исходному слову. Выберите ударную гласную или снова исправьте буквы.";
+        UpdateEditorWord();
     }
 
     private void LoadSavedForms(MutableReviewEntry entry)
@@ -1156,9 +1536,14 @@ public sealed partial class WordReviewWindow : Window
             _outputPath = correctedPath;
             Fb2FileTextBox.Text = correctedPath;
             RefreshWordCounts();
-            WordGroupsListBox.ItemsSource = BuildReviewItems();
+            ApplyReviewItems();
             UpdateEditorEnabled();
             FileStatusTextBlock.Text = count == 0 ? $"Вхождений по сохранённым исправлениям не найдено. Файл не изменён: {correctedPath}" : $"Создан/обновлён файл: {correctedPath}\nСохранённые исправления применены: заменено вхождений {count}.";
+            OfferToOpenResultFolders("Исправления применены.",
+                correctedPath,
+                Program.FormCorrectionsPathFor(_reviewPath!),
+                StatisticsPath,
+                InputTextBox.Text);
         }
         catch (OperationCanceledException) { }
         catch (Exception ex) { MessageBox.Show(this, "Не удалось применить исправления: " + ex.Message, "Ошибка", MessageBoxButton.OK, MessageBoxImage.Error); }

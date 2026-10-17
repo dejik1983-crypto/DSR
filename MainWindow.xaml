@@ -1,29 +1,31 @@
 <Window x:Class="FB2AccentConverter.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="FB2 Accent Converter — ударения в книге"
-        Width="940" Height="740" MinWidth="650" MinHeight="530"
+        Title="DSR — ударения в FB2/TXT и доработка после конвертации"
+        Width="1280" Height="920" MinWidth="1020" MinHeight="560"
         WindowStartupLocation="CenterScreen" Background="#F4EDDD"
         Foreground="#3F3025" FontFamily="Segoe UI" FontSize="13">
     <Window.Resources>
+        <SolidColorBrush x:Key="Paper" Color="#F4EDDD" />
         <SolidColorBrush x:Key="Card" Color="#FCF8EF" />
         <SolidColorBrush x:Key="Ink" Color="#3F3025" />
         <SolidColorBrush x:Key="MutedInk" Color="#70604D" />
         <SolidColorBrush x:Key="Rule" Color="#D2C2A5" />
         <SolidColorBrush x:Key="Accent" Color="#74462A" />
+        <SolidColorBrush x:Key="SelectedPaper" Color="#E8D8BA" />
         <Style TargetType="Button">
             <Setter Property="Background" Value="{StaticResource Card}" />
             <Setter Property="Foreground" Value="{StaticResource Ink}" />
             <Setter Property="BorderBrush" Value="{StaticResource Rule}" />
             <Setter Property="BorderThickness" Value="1" />
-            <Setter Property="Padding" Value="14,8" />
+            <Setter Property="Padding" Value="12,7" />
             <Setter Property="Margin" Value="0,2,6,2" />
             <Setter Property="Cursor" Value="Hand" />
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Button">
                         <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
-                                BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="6" Padding="{TemplateBinding Padding}">
+                                BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="4" Padding="2">
                             <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
                         </Border>
                         <ControlTemplate.Triggers>
@@ -48,96 +50,488 @@
             <Setter Property="BorderBrush" Value="{StaticResource Rule}" />
             <Setter Property="BorderThickness" Value="1" />
             <Setter Property="Padding" Value="6,4" />
-            <Setter Property="MinHeight" Value="32" />
+            <Setter Property="MinHeight" Value="30" />
         </Style>
-        <Style TargetType="CheckBox"><Setter Property="Foreground" Value="{StaticResource Ink}" /><Setter Property="Margin" Value="0,5" /></Style>
+        <Style TargetType="CheckBox"><Setter Property="Foreground" Value="{StaticResource Ink}" /><Setter Property="Margin" Value="0,4" /></Style>
         <Style TargetType="GroupBox">
             <Setter Property="Background" Value="{StaticResource Card}" />
             <Setter Property="Foreground" Value="{StaticResource Ink}" />
             <Setter Property="BorderBrush" Value="{StaticResource Rule}" />
             <Setter Property="BorderThickness" Value="1" />
-            <Setter Property="Padding" Value="14" />
-            <Setter Property="Margin" Value="0,0,0,12" />
+            <Setter Property="Padding" Value="12,8,12,10" />
+            <Setter Property="Margin" Value="0,0,0,10" />
             <Setter Property="FontWeight" Value="SemiBold" />
         </Style>
+        <Style TargetType="ListBox">
+            <Setter Property="Background" Value="{StaticResource Card}" />
+            <Setter Property="Foreground" Value="{StaticResource Ink}" />
+            <Setter Property="BorderBrush" Value="{StaticResource Rule}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Padding" Value="4" />
+        </Style>
+        <Style TargetType="ListBoxItem">
+            <Setter Property="Padding" Value="7,6" />
+            <Setter Property="Margin" Value="1,1,1,2" />
+            <Setter Property="Foreground" Value="{StaticResource Ink}" />
+            <Style.Triggers>
+                <Trigger Property="IsSelected" Value="True"><Setter Property="Background" Value="{StaticResource SelectedPaper}" /><Setter Property="Foreground" Value="{StaticResource Ink}" /></Trigger>
+            </Style.Triggers>
+        </Style>
+        <Style TargetType="RadioButton"><Setter Property="Foreground" Value="{StaticResource Ink}" /><Setter Property="Padding" Value="4,2" /><Setter Property="Margin" Value="0,2,14,2" /></Style>
+        <Style TargetType="TabControl">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Padding" Value="0" />
+            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+            <Setter Property="VerticalContentAlignment" Value="Stretch" />
+        </Style>
+        <Style TargetType="TabItem">
+            <Setter Property="Foreground" Value="{StaticResource MutedInk}" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Padding" Value="20,10" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="TabItem">
+                        <Border x:Name="TabFrame" Background="{StaticResource Card}" BorderBrush="{StaticResource Rule}"
+                                BorderThickness="1,1,1,0" CornerRadius="6,6,0,0" Margin="0,0,4,0" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter ContentSource="Header" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter TargetName="TabFrame" Property="Background" Value="{StaticResource SelectedPaper}" />
+                                <Setter TargetName="TabFrame" Property="BorderBrush" Value="{StaticResource Accent}" />
+                                <Setter Property="Foreground" Value="{StaticResource Ink}" />
+                            </Trigger>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="TabFrame" Property="BorderBrush" Value="#8B5734" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <Style x:Key="SectionHeader" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Foreground" Value="{StaticResource Accent}" />
+            <Setter Property="Margin" Value="0,6,0,4" />
+        </Style>
+        <Style x:Key="FieldLabel" TargetType="TextBlock">
+            <Setter Property="VerticalAlignment" Value="Center" />
+            <Setter Property="Foreground" Value="{StaticResource MutedInk}" />
+            <Setter Property="Margin" Value="0,0,8,0" />
+        </Style>
+        <Style x:Key="Note" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="Foreground" Value="{StaticResource MutedInk}" />
+            <Setter Property="TextWrapping" Value="Wrap" />
+        </Style>
+        <Style x:Key="PaperCard" TargetType="Border">
+            <Setter Property="Background" Value="{StaticResource Card}" />
+            <Setter Property="BorderBrush" Value="{StaticResource Rule}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="6" />
+            <Setter Property="Padding" Value="12" />
+        </Style>
+        <!-- Производный путь: приложение назначает его само, менять вручную нельзя. -->
+        <Style x:Key="DerivedPath" TargetType="TextBox" BasedOn="{StaticResource {x:Type TextBox}}">
+            <Setter Property="Foreground" Value="{StaticResource MutedInk}" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Padding" Value="2,2,2,2" />
+            <Setter Property="ToolTip" Value="Путь определяется автоматически по указанным выше файлам" />
+        </Style>
+        <Style x:Key="LetterButton" TargetType="Button">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderBrush" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Padding" Value="5,1,5,0" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Chip" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="7">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Chip" Property="BorderBrush" Value="#8B5734" />
+                                <Setter TargetName="Chip" Property="Background" Value="#FFF3D6" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <DataTemplate x:Key="ReviewSampleTemplate">
+            <DockPanel>
+                <CheckBox DockPanel.Dock="Left" Margin="2,2,8,2" IsChecked="{Binding Included, Mode=OneWay}" Tag="{Binding Index}" Click="SampleInclude_Click" />
+                <TextBlock TextWrapping="NoWrap" TextTrimming="CharacterEllipsis">
+                    <Run Text="{Binding Before}" /><Run Text="{Binding Exact}" FontWeight="Bold" Foreground="{StaticResource Accent}" /><Run Text="{Binding After}" />
+                </TextBlock>
+            </DockPanel>
+        </DataTemplate>
     </Window.Resources>
-    <DockPanel Margin="22">
-        <StackPanel DockPanel.Dock="Top" Margin="0,0,0,16">
-            <TextBlock Text="Расстановка ударений в FB2 и TXT" FontSize="25" FontWeight="SemiBold" Foreground="{StaticResource Ink}" />
-            <TextBlock Text="Порядок работы: 1 — настройки, 2 — выбор файла, 3 — конвертация, 4 — доработка результата. Исходный файл не изменяется." Margin="0,5,0,0" Foreground="{StaticResource MutedInk}" TextWrapping="Wrap" />
-        </StackPanel>
-        <StackPanel DockPanel.Dock="Bottom" Margin="0,8,0,0">
-            <TextBlock x:Name="ModelStatusText" TextWrapping="Wrap" Margin="0,4,0,0" Foreground="{StaticResource MutedInk}" />
-            <TextBlock x:Name="StatusText" TextWrapping="Wrap" Margin="0,4,0,0" />
-            <TextBlock x:Name="ConversionStatsText" TextWrapping="Wrap" Margin="0,4,0,0" Foreground="{StaticResource MutedInk}" />
-            <ProgressBar x:Name="ConversionProgressBar" Height="8" Margin="0,8,0,0" Minimum="0" Maximum="100" Visibility="Collapsed" />
-            <WrapPanel Margin="0,10,0,0">
-                <Button x:Name="PrepareButton" Content="Подготовка к работе" />
-                <Button x:Name="ConvertButton" Content="Начать конвертацию" Background="{StaticResource Accent}" Foreground="White" FontWeight="SemiBold" />
-                <Button x:Name="PauseConversionButton" Content="Пауза" IsEnabled="False" />
-                <Button x:Name="StopConversionButton" Content="Стоп" IsEnabled="False" />
-            </WrapPanel>
-        </StackPanel>
-        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+
+    <Grid Margin="14" Background="{StaticResource Paper}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <DockPanel Grid.Row="0" Margin="0,0,0,8">
+            <Button x:Name="HelpButton" DockPanel.Dock="Right" Content="Как это работает?" Padding="10,5" VerticalAlignment="Top"
+                    ToolTip="Краткая инструкция по всему процессу" />
             <StackPanel>
-                <GroupBox Header="1. Параметры обработки">
+                <TextBlock Text="Расстановка ударений и доработка" FontSize="20" FontWeight="SemiBold" Foreground="{StaticResource Ink}" />
+                <TextBlock Text="FB2/TXT → ударения → проверка слов. Исходный файл не изменяется." Style="{StaticResource Note}" />
+            </StackPanel>
+        </DockPanel>
+
+        <TabControl Grid.Row="1" x:Name="ReviewTabs" ClipToBounds="True">
+            <!-- ======================= 1. ПОДГОТОВКА ======================= -->
+            <TabItem Header="1. Подготовка">
+                <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
                     <StackPanel>
-                        <WrapPanel VerticalAlignment="Center">
-                            <TextBlock Text="Модель ударений:" VerticalAlignment="Center" Margin="0,0,8,0" />
-                            <ComboBox x:Name="ModelComboBox" Width="170" />
-                            <TextBlock Text="Устройство:" VerticalAlignment="Center" Margin="18,0,8,0" />
-                            <ComboBox x:Name="DeviceComboBox" Width="120" />
-                            <Button x:Name="GpuTestButton" Content="Проверить GPU" Margin="12,0,0,0" />
-                        </WrapPanel>
-                        <TextBlock x:Name="GpuStatusText" Text="Проверка NVIDIA RTX…" Margin="0,7,0,0" Foreground="{StaticResource MutedInk}" TextWrapping="Wrap" />
-                        <CheckBox x:Name="IllustrationsCheckBox" Content="Сохранить иллюстрации" IsChecked="True" IsEnabled="False" />
-                        <TextBlock Text="Выбор модели меняет только модель омографов RUAccent; turbo — универсальная, big_poetry ориентирована на стихи, tiny — облегчённая. CUDA используется RUAccent через ONNX Runtime.  Галочка сохранения иллюстраций действует для FB2." Margin="0,8,0,0" Foreground="{StaticResource MutedInk}" TextWrapping="Wrap" />
-                    </StackPanel>
-                </GroupBox>
-                <GroupBox Header="2. Файл книги">
-                    <DockPanel>
-                        <Button x:Name="BrowseInputButton" DockPanel.Dock="Right" Content="Выбрать FB2 или TXT…" />
-                        <TextBox x:Name="InputTextBox" IsReadOnly="True" Margin="0,0,10,0" ToolTip="Путь к исходному файлу" />
-                    </DockPanel>
-                </GroupBox>
-                <GroupBox Header="3. Куда сохранить результат">
-                    <StackPanel>
-                        <DockPanel>
-                            <Button x:Name="BrowseOutputButton" DockPanel.Dock="Right" Content="Путь…" />
-                            <TextBox x:Name="OutputTextBox" ToolTip="Путь к результату" />
-                        </DockPanel>
-                        <TextBlock Text="По умолчанию результат сохраняется рядом с исходником: «Имя_ударения.fb2» для FB2 или «Имя_ударения.txt» для TXT. Формат входа и выхода должен совпадать." Margin="0,7,0,0" Foreground="{StaticResource MutedInk}" TextWrapping="Wrap" />
-                    </StackPanel>
-                </GroupBox>
-                <GroupBox Header="4. Доработка после конвертации">
-                    <StackPanel>
-                        <TextBlock Text="Программа расставляет ударения сама. Что осталось непонятным (редкие слова, имена, диалект), она соберёт в отчёт «…_ударения_проверка-слов.txt» — его можно просмотреть здесь и поправить вручную, в том числе подсказками ИИ." Margin="0,0,0,8" Foreground="{StaticResource MutedInk}" TextWrapping="Wrap" />
-                        <WrapPanel>
-                            <Button x:Name="ReviewWordsButton" Content="Проверить слова / правки…" IsEnabled="False"
-                                    ToolTip="Открывает окно проверки: список слов без ударения, ручные правки, подсказки локальной модели или внешнего сервиса." />
-                        </WrapPanel>
-                        <TextBlock Text="Кнопка станет доступна после конвертации: в окно подставляется результат последнего запуска." Margin="0,6,0,0" Foreground="{StaticResource MutedInk}" TextWrapping="Wrap" />
-                    </StackPanel>
-                </GroupBox>
-                <GroupBox Header="5. Ресурсы и обслуживание">
-                    <StackPanel>
-                        <GroupBox Header="Использование ресурсов">
+                        <GroupBox Header="Параметры RUAccent"
+                                  ToolTip="Модель меняет только модель омографов RUAccent: turbo — универсальная, big_poetry — для стихов, tiny — облегчённая. CUDA используется RUAccent через ONNX Runtime и доступна только для NVIDIA RTX. Галочка сохранения иллюстраций действует для FB2.">
+                            <StackPanel>
+                                <WrapPanel VerticalAlignment="Center">
+                                    <TextBlock Text="Модель:" Style="{StaticResource FieldLabel}" />
+                                    <ComboBox x:Name="ModelComboBox" Width="150" />
+                                    <TextBlock Text="Устройство:" Style="{StaticResource FieldLabel}" Margin="14,0,8,0" />
+                                    <ComboBox x:Name="DeviceComboBox" Width="110" />
+                                    <Button x:Name="GpuTestButton" Content="Проверить GPU / CUDA" Margin="10,0,0,0"
+                                            ToolTip="Перепроверяет NVIDIA RTX и CUDA-провайдер ONNX Runtime. Обычно вручную нажимать не нужно: проверка уже выполняется при подготовке." />
+                                    <CheckBox x:Name="IllustrationsCheckBox" Content="Сохранить иллюстрации" IsChecked="True" IsEnabled="False" Margin="14,0,0,0" />
+                                </WrapPanel>
+                                <TextBlock x:Name="GpuStatusText" Text="Проверка NVIDIA RTX…" Style="{StaticResource Note}" Margin="0,6,0,0" />
+                                <TextBlock x:Name="ModelStatusText" Style="{StaticResource Note}" Margin="0,2,0,0" />
+                            </StackPanel>
+                        </GroupBox>
+
+                        <GroupBox Header="Файлы"
+                                  ToolTip="Исходная книга — что обрабатываем. Результат по умолчанию сохраняется рядом с исходником как «Имя_ударения.fb2/.txt». Отчёт «…_проверка-слов.txt» и редактируемый файл нужны для доработки на вкладках 2–3; после конвертации они подставляются автоматически.">
                             <Grid>
-                                <Grid.ColumnDefinitions><ColumnDefinition Width="48" /><ColumnDefinition Width="*" /><ColumnDefinition Width="200" /></Grid.ColumnDefinitions>
-                                <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
-                                <TextBlock Grid.Row="0" Text="CPU" /><ProgressBar x:Name="CpuUsageBar" Grid.Row="0" Grid.Column="1" Maximum="100" Height="8" Margin="0,4,10,4" /><TextBlock x:Name="CpuLabel" Grid.Row="0" Grid.Column="2" Text="CPU: измерение…" />
-                                <TextBlock Grid.Row="1" Text="ОЗУ" /><ProgressBar x:Name="MemoryUsageBar" Grid.Row="1" Grid.Column="1" Maximum="100" Height="8" Margin="0,4,10,4" /><TextBlock x:Name="MemoryLabel" Grid.Row="1" Grid.Column="2" Text="ОЗУ: измерение…" />
-                                <TextBlock Grid.Row="2" Text="GPU" /><ProgressBar x:Name="GpuUsageBar" Grid.Row="2" Grid.Column="1" Maximum="100" Height="8" Margin="0,4,10,4" /><TextBlock x:Name="GpuLabel" Grid.Row="2" Grid.Column="2" Text="GPU: поиск…" />
-                                <TextBlock Grid.Row="3" Text="Сеть" /><ProgressBar x:Name="NetworkUsageBar" Grid.Row="3" Grid.Column="1" Maximum="100" Height="8" Margin="0,4,10,4" /><TextBlock x:Name="NetworkLabel" Grid.Row="3" Grid.Column="2" Text="Сеть: измерение…" />
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+
+                                <TextBlock Grid.Row="0" Grid.Column="0" Text="Книга:" Style="{StaticResource FieldLabel}" Margin="0,3,8,3" />
+                                <TextBox Grid.Row="0" Grid.Column="1" x:Name="InputTextBox" IsReadOnly="True" Margin="0,2" ToolTip="Путь к исходному FB2 или TXT" />
+                                <Button Grid.Row="0" Grid.Column="2" x:Name="BrowseInputButton" Content="Выбрать…" Margin="8,2,0,2" />
+
+                                <TextBlock Grid.Row="1" Grid.Column="0" Text="Результат:" Style="{StaticResource FieldLabel}" Margin="0,3,8,3" />
+                                <TextBox Grid.Row="1" Grid.Column="1" x:Name="OutputTextBox" Margin="0,2" ToolTip="Путь к результату" />
+                                <Button Grid.Row="1" Grid.Column="2" x:Name="BrowseOutputButton" Content="Путь…" Margin="8,2,0,2" />
+
+                                <TextBlock Grid.Row="2" Grid.Column="0" Text="Отчёт слов:" Style="{StaticResource FieldLabel}" Margin="0,3,8,3" />
+                                <TextBox Grid.Row="2" Grid.Column="1" x:Name="ReviewFileTextBox" IsReadOnly="True" Margin="0,2" ToolTip="Отчёт нераспознанных слов «…_проверка-слов.txt»" />
+                                <Button Grid.Row="2" Grid.Column="2" x:Name="ChooseReviewButton" Content="Отчёт…" Margin="8,2,0,2" />
+
+                                <TextBlock Grid.Row="3" Grid.Column="0" Text="Правки в:" Style="{StaticResource FieldLabel}" Margin="0,3,8,3" />
+                                <TextBox Grid.Row="3" Grid.Column="1" x:Name="Fb2FileTextBox" IsReadOnly="True" Margin="0,2" ToolTip="Редактируемый файл — результат конвертации (FB2 или TXT)" />
+                                <Button Grid.Row="3" Grid.Column="2" x:Name="ChooseFb2Button" Content="Файл…" Margin="8,2,0,2" />
+
+                                <!-- Производные пути: приложение само решает, куда положит файлы правок и статистики.
+                                     Пустые строки скрыты, чтобы группа не вырастала без нужды. -->
+                                <TextBlock Grid.Row="4" Grid.Column="0" x:Name="CorrectedPathLabel" Text="Отредактир.:" Style="{StaticResource FieldLabel}" Margin="0,4,8,2" Visibility="Collapsed" />
+                                <TextBox Grid.Row="4" Grid.Column="1" x:Name="CorrectedFileTextBox" IsReadOnly="True" Margin="0,3,0,1"
+                                         FontSize="12" Style="{StaticResource DerivedPath}" Visibility="Collapsed"
+                                         ToolTip="Файл, который создаст «Применить всё и сохранить»: к редактируемому файлу добавляется _corrected" />
+
+                                <TextBlock Grid.Row="5" Grid.Column="0" x:Name="FormsPathLabel" Text="Правки (формы):" Style="{StaticResource FieldLabel}" Margin="0,4,8,2" Visibility="Collapsed" />
+                                <TextBox Grid.Row="5" Grid.Column="1" x:Name="FormsFileTextBox" IsReadOnly="True" Margin="0,3,0,1"
+                                         FontSize="12" Style="{StaticResource DerivedPath}" Visibility="Collapsed"
+                                         ToolTip="Файл с сохранёнными исправлениями и словоформами: рядом с отчётом слов" />
+
+                                <TextBlock Grid.Row="6" Grid.Column="0" x:Name="StatsPathLabel" Text="Статистика:" Style="{StaticResource FieldLabel}" Margin="0,4,8,2" Visibility="Collapsed" />
+                                <TextBox Grid.Row="6" Grid.Column="1" x:Name="StatsFileTextBox" IsReadOnly="True" Margin="0,3,0,1"
+                                         FontSize="12" Style="{StaticResource DerivedPath}" Visibility="Collapsed"
+                                         ToolTip="Отчёт со статистикой конвертации: рядом с результатом" />
                             </Grid>
                         </GroupBox>
-                        <TextBlock x:Name="ResourceSizeStatusText" TextWrapping="Wrap" Foreground="{StaticResource MutedInk}" Margin="0,0,0,8" />
-                        <WrapPanel>
-                            <Button x:Name="ClearCacheButton" Content="Очистить модели и кэш" ToolTip="Удаляет папку ресурсов рядом с приложением; приложение и ваши книги не затрагиваются." />
-                        </WrapPanel>
+
+                        <GroupBox Header="Запуск и контроль">
+                            <StackPanel>
+                                <WrapPanel>
+                                    <Button x:Name="PrepareButton" Content="Подготовка к работе"
+                                            ToolTip="Настраивает Python, загружает и проверяет выбранную модель RUAccent. Обычно нажимать не нужно: DSR делает это сам при первом запуске, в новом месте, на новом компьютере и после смены модели." />
+                                    <Button x:Name="ConvertButton" Content="Начать конвертацию" Background="{StaticResource Accent}" Foreground="White" FontWeight="SemiBold" />
+                                    <Button x:Name="PauseConversionButton" Content="Пауза" IsEnabled="False" />
+                                    <Button x:Name="StopConversionButton" Content="Стоп" IsEnabled="False" />
+                                    <Button x:Name="ReviewWordsButton" Content="Перейти к доработке слов…" IsEnabled="False"
+                                            ToolTip="Открывает вкладку ИИ-доработки: подставляет результат последнего запуска и список нераспознанных слов." />
+                                    <Button x:Name="LoadFilesButton" Content="Открыть отчёт и файл"
+                                            ToolTip="Загружает указанные отчёт слов и редактируемый файл в список слов." />
+                                </WrapPanel>
+                                <ProgressBar x:Name="ConversionProgressBar" Height="6" Margin="0,8,0,0" Minimum="0" Maximum="100" Visibility="Collapsed" />
+                                <TextBlock x:Name="StatusText" TextWrapping="Wrap" Margin="0,6,0,0" />
+                                <TextBlock x:Name="ConversionStatsText" Style="{StaticResource Note}" Margin="0,2,0,0" />
+                            </StackPanel>
+                        </GroupBox>
+
+                        <GroupBox Header="Ресурсы">
+                            <StackPanel>
+                                <Grid>
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="44" /><ColumnDefinition Width="*" /><ColumnDefinition Width="230" /></Grid.ColumnDefinitions>
+                                    <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                                    <TextBlock Grid.Row="0" Text="CPU" /><ProgressBar x:Name="CpuUsageBar" Grid.Row="0" Grid.Column="1" Maximum="100" Height="7" Margin="0,4,10,4" /><TextBlock x:Name="CpuLabel" Grid.Row="0" Grid.Column="2" Text="CPU: измерение…" Style="{StaticResource Note}" />
+                                    <TextBlock Grid.Row="1" Text="ОЗУ" /><ProgressBar x:Name="MemoryUsageBar" Grid.Row="1" Grid.Column="1" Maximum="100" Height="7" Margin="0,4,10,4" /><TextBlock x:Name="MemoryLabel" Grid.Row="1" Grid.Column="2" Text="ОЗУ: измерение…" Style="{StaticResource Note}" />
+                                    <TextBlock Grid.Row="2" Text="GPU" /><ProgressBar x:Name="GpuUsageBar" Grid.Row="2" Grid.Column="1" Maximum="100" Height="7" Margin="0,4,10,4" /><TextBlock x:Name="GpuLabel" Grid.Row="2" Grid.Column="2" Text="GPU: поиск…" Style="{StaticResource Note}" />
+                                    <TextBlock Grid.Row="3" Text="Сеть" /><ProgressBar x:Name="NetworkUsageBar" Grid.Row="3" Grid.Column="1" Maximum="100" Height="7" Margin="0,4,10,4" /><TextBlock x:Name="NetworkLabel" Grid.Row="3" Grid.Column="2" Text="Сеть: измерение…" Style="{StaticResource Note}" />
+                                </Grid>
+                                <DockPanel Margin="0,6,0,0">
+                                    <Button x:Name="ClearCacheButton" DockPanel.Dock="Right" Content="Очистить модели и кэш"
+                                            ToolTip="Удаляет папку ресурсов рядом с приложением; приложение и ваши книги не затрагиваются." />
+                                    <TextBlock x:Name="ResourceSizeStatusText" Style="{StaticResource Note}" VerticalAlignment="Center" Margin="0,0,10,0" />
+                                </DockPanel>
+                            </StackPanel>
+                        </GroupBox>
                     </StackPanel>
-                </GroupBox>
-            </StackPanel>
-        </ScrollViewer>
-    </DockPanel>
+                </ScrollViewer>
+            </TabItem>
+
+            <!-- ======================= 2. ИИ-ДОРАБОТКА ======================= -->
+            <TabItem Header="2. ИИ-доработка">
+                <Grid Margin="0,8,0,0">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+
+                    <Border Grid.Row="0" Style="{StaticResource PaperCard}" Margin="0,0,0,10">
+                        <StackPanel>
+                            <WrapPanel VerticalAlignment="Center">
+                                <TextBlock Text="Движок подсказок:" VerticalAlignment="Center" Margin="0,0,8,0" />
+                                <ComboBox x:Name="LlmProviderComboBox" Width="250"
+                                          ToolTip="Своя модель на диске — файлы в папке ресурсы\модели\llm. Ollama — ваш локальный сервер. Внешний API — сервис с OpenAI-совместимым интерфейсом (OpenAI, OpenRouter, LM Studio, llama.cpp, vLLM)." />
+                                <CheckBox x:Name="LlmReuseCheckBox" Margin="14,0,0,0" VerticalAlignment="Center"
+                                          Content="Не переспрашивать уже отвеченные слова"
+                                          ToolTip="Включено: если подсказка для слова уже есть (у любого движка), слово не отправляется. Снимите галочку, чтобы новый движок проверил заново все слова, по которым отвечали другие." />
+                            </WrapPanel>
+
+                            <DockPanel x:Name="LlmLocalPanel" Margin="0,6,0,0">
+                                <Button x:Name="LlmLocalRefreshButton" DockPanel.Dock="Right" Content="Обновить" Padding="10,5" Margin="8,0,0,0" />
+                                <ComboBox x:Name="LlmModelComboBox"
+                                          ToolTip="Всё, что лежит в ресурсы\модели\llm и содержит genai_config.json. Чтобы добавить модель, положите её папку туда — она появится в списке." />
+                            </DockPanel>
+
+                            <DockPanel x:Name="LlmOllamaPanel" Margin="0,6,0,0">
+                                <Button x:Name="LlmOllamaRefreshButton" DockPanel.Dock="Right" Content="Список моделей" Padding="10,5" Margin="8,0,0,0" />
+                                <TextBlock Text="Адрес:" VerticalAlignment="Center" Margin="0,0,6,0" />
+                                <TextBox x:Name="LlmOllamaUrlTextBox" Width="190" Margin="0,0,12,0" ToolTip="Обычно http://127.0.0.1:11434" />
+                                <TextBlock Text="Модель:" VerticalAlignment="Center" Margin="0,0,6,0" />
+                                <ComboBox x:Name="LlmOllamaModelComboBox" IsEditable="True" MinWidth="170"
+                                          ToolTip="Имя модели в Ollama. Подходит любая загруженная модель: ollama pull имя-модели." />
+                            </DockPanel>
+
+                            <StackPanel x:Name="LlmApiPanel" Margin="0,6,0,0">
+                                <DockPanel>
+                                    <Button x:Name="LlmApiRefreshButton" DockPanel.Dock="Right" Content="Список моделей" Padding="10,5" Margin="8,0,0,0" />
+                                    <TextBlock Text="Адрес:" VerticalAlignment="Center" Margin="0,0,6,0" />
+                                    <TextBox x:Name="LlmApiUrlTextBox" Width="230" Margin="0,0,12,0"
+                                             ToolTip="Адрес вместе с версией, например https://api.openai.com/v1" />
+                                    <TextBlock Text="Ключ:" VerticalAlignment="Center" Margin="0,0,6,0" />
+                                    <TextBox x:Name="LlmApiKeyTextBox" MinWidth="120"
+                                             ToolTip="Ключ сохраняется в файле ресурсы\llm-настройки.json в открытом виде — не передавайте этот файл другим. Вместо него можно задать переменную окружения DSR_LLM_API_KEY." />
+                                </DockPanel>
+                                <DockPanel Margin="0,6,0,0">
+                                    <TextBlock Text="Модель:" VerticalAlignment="Center" Margin="0,0,6,0" />
+                                    <ComboBox x:Name="LlmApiModelComboBox" IsEditable="True" MinWidth="220"
+                                              ToolTip="Например gpt-4o-mini, deepseek-chat, openrouter/... — имя зависит от сервиса." />
+                                </DockPanel>
+                            </StackPanel>
+
+                            <DockPanel Margin="0,8,0,0">
+                                <Button x:Name="LlmBenchmarkButton" DockPanel.Dock="Left" Content="Проверить движок"
+                                        ToolTip="Прогоняет 31 контрольное слово с заранее известным ударением и показывает, сколько движок угадал и за какое время." />
+                                <TextBlock x:Name="LlmBenchmarkTextBlock" TextWrapping="Wrap" VerticalAlignment="Center" Margin="10,0,0,0" Style="{StaticResource Note}" />
+                            </DockPanel>
+                            <TextBlock x:Name="LlmEngineTextBlock" Style="{StaticResource Note}" Margin="0,4,0,0" />
+                        </StackPanel>
+                    </Border>
+
+                    <Border Grid.Row="1" Style="{StaticResource PaperCard}"
+                            ToolTip="Проход ИИ можно пропустить. Найденное — только подсказки: каждая принимается вручную на вкладке «3. Ручная доводка» кнопкой «Да ✓».">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+
+                            <DockPanel Grid.Row="0" Margin="0,0,0,6">
+                                <Button x:Name="LlmCheckButton" DockPanel.Dock="Right" Content="Подсказки ИИ по контексту" Padding="14,8"
+                                        Background="{StaticResource Accent}" Foreground="White" FontWeight="SemiBold"
+                                        ToolTip="Выбранный движок предложит ударение для слов, которых нет в словаре. Найденное показывается по каждому слову отдельно и применяется только вручную." />
+                                <TextBlock Text="Нераспознанные слова" FontWeight="SemiBold" VerticalAlignment="Center" />
+                                <TextBlock Text=" (двойной щёлчок открывает слово на вкладке 3)" Style="{StaticResource Note}" VerticalAlignment="Center" />
+                            </DockPanel>
+
+                            <ListBox Grid.Row="1" x:Name="UnrecognizedWordsListBox" DisplayMemberPath="Display"
+                                     ToolTip="Список слов из отчёта, для которых нет ни словарного, ни вашего варианта." />
+
+                            <WrapPanel Grid.Row="2" Margin="0,8,0,0">
+                                <Button x:Name="ApplyAllButton" Content="Применить все правки → *_corrected" IsEnabled="False"
+                                        Background="{StaticResource Accent}" Foreground="White" FontWeight="SemiBold"
+                                        ToolTip="Применяет все внесённые правки по группам и сохранённые словоформы за один раз; исходный файл не изменяется." />
+                                <Button x:Name="OpenCorrectionsButton" Content="Открыть файл форм слов" IsEnabled="False" />
+                            </WrapPanel>
+                        </Grid>
+                    </Border>
+                </Grid>
+            </TabItem>
+
+            <!-- ======================= 3. РУЧНАЯ ДОВОДКА ======================= -->
+            <TabItem Header="3. Ручная доводка">
+                <Border Style="{StaticResource PaperCard}" Margin="0,8,0,0">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+
+                        <DockPanel Grid.Row="0" Margin="0,0,0,6">
+                            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" Margin="10,0,0,6" VerticalAlignment="Center">
+                                <TextBlock Text="Шрифт:" VerticalAlignment="Center" Foreground="{StaticResource MutedInk}" Margin="0,0,4,0" />
+                                <Button x:Name="FontSmallerButton" Content="A−" Width="34" Padding="0" Margin="0,0,4,0"
+                                        ToolTip="Мельче: уменьшить шрифт текста и списков" />
+                                <Button x:Name="FontLargerButton" Content="A+" Width="34" Padding="0"
+                                        ToolTip="Крупнее: увеличить шрифт текста и списков" />
+                            </StackPanel>
+                            <ComboBox x:Name="SortModeComboBox" DockPanel.Dock="Right" Width="180" Margin="8,0,0,6" />
+                            <TextBlock Text="Поиск:" VerticalAlignment="Center" Margin="0,0,6,0" />
+                            <TextBox x:Name="SearchTextBox" MinWidth="200" Margin="0,0,0,6" ToolTip="Фильтр по слову или контексту" />
+                        </DockPanel>
+
+                        <Grid Grid.Row="1">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" MinWidth="220" />
+                                <ColumnDefinition Width="8" />
+                                <ColumnDefinition Width="1.3*" MinWidth="320" />
+                            </Grid.ColumnDefinitions>
+
+                            <DockPanel Grid.Column="0" Margin="0,0,6,0"
+                                       ToolTip="Выберите слово в верхнем списке, затем конкретный контекст ниже. Снимите флажок у контекста, чтобы исключить его из общей правки.">
+                                <Grid>
+                                    <Grid.RowDefinitions><RowDefinition Height="*" /><RowDefinition Height="8" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+                                    <DockPanel Grid.Row="0">
+                                        <TextBlock DockPanel.Dock="Top" Text="Группы слов" FontWeight="SemiBold" Margin="0,0,0,4" />
+                                        <ListBox x:Name="WordGroupsListBox" MinWidth="220" SelectionMode="Single" DisplayMemberPath="Display" />
+                                    </DockPanel>
+                                    <GridSplitter Grid.Row="1" Height="8" HorizontalAlignment="Stretch" VerticalAlignment="Center" ResizeDirection="Rows" ResizeBehavior="PreviousAndNext" ShowsPreview="False" />
+                                    <DockPanel Grid.Row="2" Margin="0,8,0,0">
+                                        <TextBlock DockPanel.Dock="Top" Text="Контексты выбранной группы" FontWeight="SemiBold" Margin="0,0,0,4"
+                                                   ToolTip="Строки показаны сокращённо: полный фрагмент открывается справа при выборе контекста." />
+                                        <ListBox x:Name="ContextsListBox" SelectionMode="Single" ItemTemplate="{StaticResource ReviewSampleTemplate}"
+                                                 ScrollViewer.HorizontalScrollBarVisibility="Disabled" />
+                                    </DockPanel>
+                                </Grid>
+                            </DockPanel>
+
+                            <GridSplitter Grid.Column="1" Width="8" HorizontalAlignment="Center" VerticalAlignment="Stretch" ResizeDirection="Columns" ResizeBehavior="PreviousAndNext" ShowsPreview="False" />
+
+                            <Grid Grid.Column="2" Margin="10,0,0,0">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="*" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+
+                                <!-- Рабочие поля остаются скрытыми: написание правится прямо в тексте ниже. -->
+                                <TextBox x:Name="CorrectionTextBox" Visibility="Collapsed" IsTabStop="False" Focusable="False" />
+                                <TextBlock x:Name="ContextTextBlock" Visibility="Collapsed" />
+
+                                <Border x:Name="LlmHintPanel" Grid.Row="0" Margin="0,0,0,6" Padding="10,8"
+                                        CornerRadius="6" Background="#FFF6E0" BorderBrush="{StaticResource Accent}"
+                                        BorderThickness="1" Visibility="Collapsed">
+                                    <StackPanel>
+                                        <TextBlock Text="ПОДСКАЗКА ИИ ПО КОНТЕКСТУ" Style="{StaticResource SectionHeader}" Margin="0,0,0,2" />
+                                        <TextBlock x:Name="LlmHintTextBlock" TextWrapping="Wrap" FontSize="14" />
+                                    </StackPanel>
+                                </Border>
+
+                                <StackPanel Grid.Row="1">
+                                    <TextBlock Text="Ударение в слове" Style="{StaticResource SectionHeader}"
+                                               ToolTip="Клик по гласной ставит на неё ударение. Повторный клик по «е»: сначала «ё», потом просто «е» без ударения. Клик по другой гласной переносит ударение туда. «ё» всегда ударная." />
+                                    <WrapPanel x:Name="StressChoicesPanel" Margin="0,2,0,6" />
+                                </StackPanel>
+
+                                <Border Grid.Row="2" Background="{StaticResource Paper}" BorderBrush="{StaticResource Rule}"
+                                        BorderThickness="1" CornerRadius="4" Padding="10">
+                                    <DockPanel>
+                                        <TextBlock DockPanel.Dock="Top" Text="Фрагмент текста" FontWeight="SemiBold" Margin="0,0,0,4"
+                                                   ToolTip="Весь текст вокруг проверяемого слова; само слово выделено жирным и с ударением. Буквы слова можно исправить прямо здесь — при нажатии «Да ✓» будет предложено сохранить исправленное написание." />
+                                        <DockPanel DockPanel.Dock="Bottom" Margin="0,6,0,0">
+                                            <Button x:Name="ResetWordButton" DockPanel.Dock="Right" Content="Вернуть исходное слово" Padding="10,5" Margin="8,0,0,0"
+                                                    ToolTip="Отменить правку написания и вернуться к слову из книги." />
+                                            <StackPanel Orientation="Horizontal">
+                                                <TextBlock x:Name="SelectionCountTextBlock" VerticalAlignment="Center" Style="{StaticResource Note}" />
+                                                <TextBlock x:Name="OriginalWordTextBlock" VerticalAlignment="Center" Style="{StaticResource Note}" Margin="14,0,0,0" />
+                                            </StackPanel>
+                                        </DockPanel>
+                                        <RichTextBox x:Name="FragmentEditor" BorderThickness="0" Background="Transparent"
+                                                     FontSize="16" AcceptsReturn="False"
+                                                     VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                                                     ToolTip="Весь фрагмент текста. Проверяемое слово — жирным и с ударением; буквы слова можно исправить прямо здесь." />
+                                    </DockPanel>
+                                </Border>
+
+                                <Expander Grid.Row="3" Margin="0,8,0,0" Header="Опечатка и дополнительные словоформы"
+                                          ToolTip="Слово с опечаткой правьте прямо в тексте выше — кнопки ударения перестроятся под новое написание. Допускается небольшое число отличий (до 3 букв), чтобы случайно не заменить другое слово. Здесь же можно добавить дополнительные словоформы вручную.">
+                                    <StackPanel Margin="0,6,0,0">
+                                        <ComboBox x:Name="GrammaticalCaseComboBox" Width="260" HorizontalAlignment="Left" Margin="0,0,0,4" />
+                                        <StackPanel x:Name="DeclensionRowsPanel" />
+                                        <Button x:Name="AddFormButton" Content="Добавить словоформу" HorizontalAlignment="Left" />
+                                    </StackPanel>
+                                </Expander>
+
+                                <DockPanel Grid.Row="4" Margin="0,8,0,0">
+                                    <Button x:Name="ConfirmStressButton" DockPanel.Dock="Right" Content="Да ✓" MinWidth="96" Padding="14,8" Margin="8,0,0,0"
+                                            Background="{StaticResource Accent}" Foreground="White" FontWeight="SemiBold"
+                                            ToolTip="Принять вариант (ударение и/или исправленное написание) и перейти к следующей группе (Ctrl+Enter)" />
+                                    <TextBlock VerticalAlignment="Center" Style="{StaticResource Note}"
+                                               Text="Правка применяется ко всей группе точных совпадений слова." />
+                                </DockPanel>
+                            </Grid>
+                        </Grid>
+
+                        <WrapPanel Grid.Row="2" Margin="0,8,0,0">
+                            <Button x:Name="PreviousButton" Content="◀ Предыдущее" IsEnabled="False" />
+                            <Button x:Name="NextButton" Content="Следующее ▶" IsEnabled="False" />
+                            <Button x:Name="SaveCorrectionButton" Content="Применить всё и сохранить" IsEnabled="False"
+                                    Background="{StaticResource Accent}" Foreground="White"
+                                    ToolTip="Проходит по всем группам с правками и сохраняет результат одним файлом" />
+                        </WrapPanel>
+                    </Grid>
+                </Border>
+            </TabItem>
+        </TabControl>
+
+        <Border Grid.Row="2" Margin="0,8,0,0" Background="{StaticResource Card}" BorderBrush="{StaticResource Rule}"
+                BorderThickness="1" CornerRadius="6" Padding="10,4">
+            <ScrollViewer VerticalScrollBarVisibility="Auto" MaxHeight="60">
+                <TextBlock x:Name="FileStatusTextBlock" TextWrapping="Wrap" Foreground="{StaticResource Ink}"
+                           Text="Выберите отчёт и редактируемый файл на вкладке «Подготовка»." />
+            </ScrollViewer>
+        </Border>
+    </Grid>
 </Window>

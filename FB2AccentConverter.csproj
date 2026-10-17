@@ -21,13 +21,9 @@
     <DebugType>none</DebugType>
     <DebugSymbols>false</DebugSymbols>
   </PropertyGroup>
-  <PropertyGroup>
-    <DeepReaderProjectPath Condition="'$(DeepReaderProjectPath)' == ''">$(MSBuildThisFileDirectory)..\DeepReader_x64 V*Beta Bionic\DeepReader.csproj</DeepReaderProjectPath>
-  </PropertyGroup>
   <ItemGroup>
     <Compile Remove="publish\**\*.cs" />
     <Page Remove="publish\**\*.xaml" />
-    <ProjectReference Include="$(DeepReaderProjectPath)" AdditionalProperties="SelfContained=true;RuntimeIdentifier=win-x64" />
     <EmbeddedResource Include="ruaccent_worker.py" LogicalName="DSR.ruaccent_worker.py" />
     <EmbeddedResource Include="llm_stress_worker.py" LogicalName="DSR.llm_stress_worker.py" />
     <EmbeddedResource Include="requirements.txt" LogicalName="DSR.requirements.txt" />

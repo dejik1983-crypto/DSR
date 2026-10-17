@@ -56,9 +56,22 @@ public sealed partial class MainWindow : Window
     private string? _loadedFile;
     private bool _busy;
 
-    public MainWindow()
+    public MainWindow() : this(null, null) { }
+
+    public MainWindow(string? reviewPath, string? fb2Path)
     {
         InitializeComponent();
+        // Окно не должно быть выше рабочей области экрана: при крупном масштабе
+        // заявленные 1280×920 превращаются в пиксели больше экрана, шапка уезжает
+        // вверх, и содержимое вкладки наползает на заголовок с вкладками.
+        var workArea = SystemParameters.WorkArea;
+        if (workArea.Width > 0 && workArea.Height > 0)
+        {
+            MaxWidth = workArea.Width;
+            MaxHeight = workArea.Height;
+            Width = Math.Min(Width, workArea.Width);
+            Height = Math.Min(Height, workArea.Height);
+        }
         foreach (var model in new[] { "turbo3.1", "turbo3", "turbo2", "big_poetry", "tiny" }) _model.Items.Add(model);
         _model.SelectedIndex = 0;
         _model.SelectionChanged += (_, _) => UpdateSelectedModelStatus();
@@ -67,6 +80,7 @@ public sealed partial class MainWindow : Window
         BrowseInputButton.Click += (_, _) => SelectInput();
         BrowseOutputButton.Click += (_, _) => SelectOutput();
         _clearCacheButton.Click += (_, _) => ClearCache();
+        HelpButton.Click += (_, _) => ShowProcessHelp();
         var canWrite = CanWriteToApplicationDirectory();
         _clearCacheButton.IsEnabled = canWrite;
         _prepareButton.IsEnabled = canWrite;
@@ -80,7 +94,7 @@ public sealed partial class MainWindow : Window
         _stopConversion.Click += (_, _) => StopConversion();
         _reviewWords.Click += (_, _) => OpenWordReview();
         UpdateReviewButton();
-        _prepareButton.Click += async (_, _) => await PrepareAsync();
+        _prepareButton.Click += async (_, _) => await PrepareAsync(automatic: false);
         _gpuTest.Click += async (_, _) => await CheckGpuAsync();
         _resourceTimer.Tick += async (_, _) => await UpdateResourceUsageAsync();
         _resourceTimer.Start();
@@ -93,6 +107,65 @@ public sealed partial class MainWindow : Window
             _ = UpdateResourceSizeStatusAsync();
         };
         _ = UpdateResourceUsageAsync();
+        // Подготовка окружения не требует нажатий: при первом запуске, в новом месте,
+        // на новом компьютере или после смены модели DSR готовится сам.
+        Loaded += (_, _) => _ = AutoPrepareIfNeededAsync();
+        // Производные пути (отредактированный файл, файл правок, статистика) заполняются
+        // сами при выборе любой книги, результата, отчёта или редактируемого файла.
+        InputTextBox.TextChanged += (_, _) => UpdateDerivedFilePaths();
+        OutputTextBox.TextChanged += (_, _) => UpdateDerivedFilePaths();
+        ReviewFileTextBox.TextChanged += (_, _) => UpdateDerivedFilePaths();
+        Fb2FileTextBox.TextChanged += (_, _) => UpdateDerivedFilePaths();
+        InitializeReview(reviewPath, fb2Path);
+        if (reviewPath != null || fb2Path != null) ReviewTabs.SelectedIndex = 1;
+    }
+
+    /// <summary>
+    /// Показывает пути, которые приложение назначает само: файл после применения правок,
+    /// файл сохранённых исправлений и отчёт со статистикой. Пусто, если исходный путь не выбран.
+    /// </summary>
+    private void UpdateDerivedFilePaths()
+    {
+        SetDerivedPath(CorrectedPathLabel, CorrectedFileTextBox, DerivedPath(Fb2FileTextBox.Text, GetCorrectedOutputPath));
+        SetDerivedPath(FormsPathLabel, FormsFileTextBox, DerivedPath(ReviewFileTextBox.Text, Program.FormCorrectionsPathFor));
+        SetDerivedPath(StatsPathLabel, StatsFileTextBox, DerivedPath(OutputTextBox.Text, Program.StatisticsPathFor));
+    }
+
+    // Пустую строку показывать незачем: без выбранных файлов группа «Файлы» остаётся компактной.
+    private static void SetDerivedPath(TextBlock label, TextBox box, string value)
+    {
+        var visible = !string.IsNullOrEmpty(value);
+        label.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+        box.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+        box.Text = value;
+    }
+
+    private static string DerivedPath(string source, Func<string, string> build)
+    {
+        if (string.IsNullOrWhiteSpace(source)) return string.Empty;
+        try { return build(source); }
+        catch (Exception) { return string.Empty; }
+    }
+
+    private void ShowProcessHelp()
+    {
+        MessageBox.Show(this,
+            "Порядок работы\n\n" +
+            "1. Подготовка\n" +
+            "• Выберите модель RUAccent и устройство (CPU или CUDA).\n" +
+            "• Нажимать «Подготовка к работе» и «Проверить GPU / CUDA» не нужно: DSR готовит окружение сам при первом запуске, в новом месте, на новом компьютере и после смены модели.\n" +
+            "• Кнопки остаются для ручной перепроверки — например, если вы подключили другую видеокарту.\n" +
+            "• Выберите книгу FB2/TXT и путь результата, затем «Начать конвертацию».\n" +
+            "• Ниже — прогресс, статус, мониторинг (CPU, ОЗУ, GPU, сеть) и объём ресурсов, а также пути файлов, которые приложение создаст.\n\n" +
+            "2. ИИ-доработка (можно пропустить)\n" +
+            "• Выберите движок подсказок — свою модель на диске, Ollama или внешний API.\n" +
+            "• Нажмите «Подсказки ИИ по контексту»: в списке — слова, для которых нет ни словарного, ни вашего варианта.\n" +
+            "• Найденное — только подсказки, каждая принимается вручную на вкладке 3.\n\n" +
+            "3. Ручная доводка\n" +
+            "• Выберите слово в списке и конкретный контекст.\n" +
+            "• Поставьте ударение (или исправьте опечатку прямо в поле «Исправленный вариант») и нажмите «Да ✓».\n" +
+            "• «Применить всё и сохранить» запишет правки в редактируемый файл. Исходная книга не изменяется.",
+            "Как это работает", MessageBoxButton.OK, MessageBoxImage.Information);
     }
 
     private void UpdateSelectedModelStatus()
@@ -106,9 +179,14 @@ public sealed partial class MainWindow : Window
                 bytes = Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories).Sum(file => new FileInfo(file).Length);
         }
         catch (IOException) { }
-        _modelStatus.Text = bytes > 0
+        var baseText = bytes > 0
             ? $"Выбрана модель омографов: {model}; её файлы (ONNX и токенизатор) занимают {bytes / 1024.0 / 1024:0.0} МБ."
             : $"Выбрана модель омографов: {model}; файлы появятся при загрузке.";
+        // Модель сменилась после подготовки — DSR доготовит её сам при следующем запуске.
+        var pending = PreparationStamp.TryRead() is { } stamp && !stamp.IsValidFor(model);
+        _modelStatus.Text = pending
+            ? baseText + " Модель сменилась — окружение подготовится само при следующем запуске (или по кнопке «Подготовка к работе»)."
+            : baseText;
         _ = UpdateResourceSizeStatusAsync();
     }
 
@@ -391,7 +469,10 @@ public sealed partial class MainWindow : Window
 
     private async Task CheckGpuAsync()
     {
-        _gpuTest.IsEnabled = false;
+        // Проверка GPU пользуется тем же окружением Python, что и подготовка, поэтому
+        // на время проверки блокируем подготовку (и наоборот) — иначе два pip-процесса
+        // одновременно переписывают файлы окружения и один падает с WinError 32.
+        SetBusy(true);
         _gpuStatus.Text = "Готовлю Python-компоненты и проверяю NVIDIA RTX. Первый запуск скачивает зависимости из интернета…";
         try
         {
@@ -469,7 +550,7 @@ public sealed partial class MainWindow : Window
             _gpuStatus.Text = "Не удалось проверить или установить GPU: " + ex.GetBaseException().Message + " Будет использован CPU.";
             _gpuStatus.Foreground = Brushes.DarkOrange;
         }
-        finally { _gpuTest.IsEnabled = true; }
+        finally { SetBusy(false); }
     }
 
     private async Task ConvertAsync()
@@ -497,7 +578,7 @@ public sealed partial class MainWindow : Window
         _pauseConversion.IsEnabled = true;
         _stopConversion.IsEnabled = true;
         _pauseConversion.Content = "Пауза";
-        _diagnosticsPath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(output))!, Path.GetFileNameWithoutExtension(output) + "_статистика.txt");
+        _diagnosticsPath = Program.StatisticsPathFor(output);
         var conversionWatch = Stopwatch.StartNew();
         var totalUnits = 0;
         var sourceBytes = new FileInfo(input).Length;
@@ -517,7 +598,7 @@ public sealed partial class MainWindow : Window
                 {
                     if (message.StartsWith("DIAGNOSTICS:", StringComparison.Ordinal))
                     {
-                        _diagnosticsPath = Path.Combine(Path.GetDirectoryName(message["DIAGNOSTICS:".Length..])!, Path.GetFileNameWithoutExtension(message["DIAGNOSTICS:".Length..]) + "_статистика.txt");
+                        _diagnosticsPath = Program.StatisticsPathFor(message["DIAGNOSTICS:".Length..]);
                         return;
                     }
                     if (message.StartsWith("DSR_PERF:", StringComparison.Ordinal))
@@ -576,7 +657,8 @@ public sealed partial class MainWindow : Window
             if ((outputExtension.Equals(".fb2", StringComparison.OrdinalIgnoreCase) || outputExtension.Equals(".txt", StringComparison.OrdinalIgnoreCase)) && _reviewWords.IsEnabled)
             {
                 var reviewPath = Program.ReviewPathFor(output);
-                new WordReviewWindow(reviewPath, output) { Owner = this }.ShowDialog();
+                SetReviewPaths(reviewPath, output);
+                ReviewTabs.SelectedIndex = 1;
                 UpdateReviewButton();
             }
             _ = UpdateResourceSizeStatusAsync();
@@ -639,9 +721,9 @@ public sealed partial class MainWindow : Window
 
     private void OpenWordReview()
     {
-        var window = new WordReviewWindow(_reviewWords.Tag is ValueTuple<string, string> paths ? paths.Item1 : null,
-            _reviewWords.Tag is ValueTuple<string, string> outputPaths ? outputPaths.Item2 : null) { Owner = this };
-        window.ShowDialog();
+        SetReviewPaths(_reviewWords.Tag is ValueTuple<string, string> paths ? paths.Item1 : null,
+            _reviewWords.Tag is ValueTuple<string, string> outputPaths ? outputPaths.Item2 : null);
+        ReviewTabs.SelectedIndex = 1;
         UpdateReviewButton();
     }
 
@@ -651,18 +733,26 @@ public sealed partial class MainWindow : Window
         _status.Text = "Останавливаю после текущего фрагмента…";
     }
 
-    private async Task PrepareAsync()
+    /// <summary>
+    /// Подготовка окружения. При automatic = true запускается сама при первом запуске,
+    /// в новом месте, на новом компьютере или после смены модели — без кнопок и без
+    /// сообщения «DSR готов» (оно нужно только при ручной проверке).
+    /// </summary>
+    private async Task PrepareAsync(bool automatic)
     {
         if (_prepared && Directory.Exists(Program.DataDirectory))
         {
-            MessageBox.Show(this, "Приложение готово к работе.\n\nДоступно: обработка FB2 с сохранением структуры и изображений, обработка TXT с сохранением строк, настройка CPU/CUDA.", "DSR готов", MessageBoxButton.OK, MessageBoxImage.Information);
+            if (!automatic)
+                MessageBox.Show(this, "Приложение готово к работе.\n\nДоступно: обработка FB2 с сохранением структуры и изображений, обработка TXT с сохранением строк, настройка CPU/CUDA.", "DSR готов", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
         StartActivity("Подготовка Python и моделей");
         SetBusy(true);
         var selectedDevice = _device.SelectedItem?.ToString() ?? "CPU";
         var selectedModel = _model.SelectedItem?.ToString() ?? "turbo3.1";
-        _status.Text = "Настраиваю Python и зависимости, загружаю выбранную модель, выполняю тест обработки…";
+        _status.Text = automatic
+            ? "Первый запуск в этом месте: настраиваю Python и зависимости, загружаю выбранную модель, выполняю тест обработки…"
+            : "Настраиваю Python и зависимости, загружаю выбранную модель, выполняю тест обработки…";
         try
         {
             Program.SetupProgress = message => Dispatcher.Invoke(() =>
@@ -708,13 +798,17 @@ public sealed partial class MainWindow : Window
             _prepared = true;
             _status.Text = "Приложение готово к работе.";
             UpdateSelectedModelStatus();
-            MessageBox.Show(this, "Приложение готово к работе.\n\nДоступно:\n• FB2 → FB2 с сохранением структуры и иллюстраций;\n• TXT → TXT с сохранением строк и форматирования текста;\n• CPU или доступная CUDA-видеокарта;\n• исходный файл не изменяется.", "DSR готов", MessageBoxButton.OK, MessageBoxImage.Information);
+            // Отметка о подготовке: в следующий раз всё это сделается само.
+            PreparationStamp.Create(selectedModel, _device.SelectedItem?.ToString() ?? selectedDevice, _gpuStatus.Text).Save();
+            if (!automatic)
+                MessageBox.Show(this, "Приложение готово к работе.\n\nДоступно:\n• FB2 → FB2 с сохранением структуры и иллюстраций;\n• TXT → TXT с сохранением строк и форматирования текста;\n• CPU или доступная CUDA-видеокарта;\n• исходный файл не изменяется.\n\nДальше готовить вручную не нужно: при следующих запусках DSR проверит это сам.", "DSR готов", MessageBoxButton.OK, MessageBoxImage.Information);
         }
         catch (Exception ex)
         {
             if (Program.SetupProgress != null) Program.SetupProgress = null;
             StopActivity("Ошибка подготовки");
             _prepared = false;
+            PreparationStamp.Clear();
             var details = $"Модель: {_model.SelectedItem}; устройство: {_device.SelectedItem}; Python: {Path.Combine(Program.DataDirectory, "python", "Scripts", "python.exe")}";
             Program.LogError("Подготовка к работе не завершена", new InvalidOperationException(details, ex));
             _status.Text = "Подготовка не завершена: " + ex.GetBaseException().Message;
@@ -731,6 +825,62 @@ public sealed partial class MainWindow : Window
                 _clearCacheButton.IsEnabled = false;
             }
         }
+    }
+
+    /// <summary>
+    /// Готовим окружение сами, когда это действительно нужно: первый запуск, новое место,
+    /// другой компьютер, новая версия DSR или другая модель обработки. Если отметка о
+    /// подготовке совпадает, дополнительно быстро проверяем, что окружение ещё живое.
+    /// </summary>
+    private async Task AutoPrepareIfNeededAsync()
+    {
+        try { await AutoPrepareCoreAsync(); }
+        catch (Exception error)
+        {
+            Program.LogError("Автоподготовка окружения", error);
+            _status.Text = "Автоматическая подготовка не удалась: " + error.Message + " Нажмите «Подготовка к работе».";
+        }
+    }
+
+    private async Task AutoPrepareCoreAsync()
+    {
+        if (!CanWriteToApplicationDirectory())
+        {
+            Program.LogReview("Автоподготовка: папка приложения недоступна для записи.");
+            return;
+        }
+        var model = _model.SelectedItem?.ToString() ?? "turbo3.1";
+        Program.LogReview("Автоподготовка: проверяю отметку о подготовке (модель " + model + ").");
+        if (PreparationStamp.TryRead() is { } stamp && stamp.IsValidFor(model))
+        {
+            _prepared = true;
+            ApplyPreparationStamp(stamp, model);
+            if (await Task.Run(Program.VerifyEnvironmentQuick))
+            {
+                Program.LogReview("Автоподготовка: отметка подходит, окружение готово.");
+                return;
+            }
+            // Окружение переехало или сломалось — готовим заново.
+            Program.LogReview("Автоподготовка: быстрая проверка окружения не прошла, запускаю подготовку.");
+            _prepared = false;
+        }
+        else
+        {
+            Program.LogReview("Автоподготовка: отметки нет или она не подходит, запускаю подготовку.");
+        }
+        await PrepareAsync(automatic: true);
+    }
+
+    private void ApplyPreparationStamp(PreparationStamp stamp, string model)
+    {
+        if (stamp.Device == "CUDA" && !_device.Items.Contains("CUDA")) _device.Items.Add("CUDA");
+        if (_device.Items.Contains(stamp.Device)) _device.SelectedItem = stamp.Device;
+        if (!string.IsNullOrWhiteSpace(stamp.Gpu))
+        {
+            _gpuStatus.Text = stamp.Gpu + " Проверено при подготовке " + stamp.PreparedAt + ".";
+            _gpuStatus.Foreground = Brushes.DarkGreen;
+        }
+        _status.Text = "Готово: окружение уже подготовлено (модель омографов: " + model + "). Кнопки подготовки и проверки GPU нажимать не нужно.";
     }
 
     private static string FormatElapsed(TimeSpan elapsed)
@@ -774,11 +924,12 @@ public sealed partial class MainWindow : Window
                 Directory.Delete(normalizedCache, recursive: true);
             }
             _prepared = false;
+            PreparationStamp.Clear();
             _clearCacheButton.IsEnabled = CanWriteToApplicationDirectory();
             _prepareButton.IsEnabled = _clearCacheButton.IsEnabled;
             _convert.IsEnabled = _clearCacheButton.IsEnabled;
             _ = UpdateResourceSizeStatusAsync();
-            _status.Text = "Ресурсы удалены. Нажмите «Подготовка к работе», чтобы снова установить компоненты и модели.";
+            _status.Text = "Ресурсы удалены. При следующем запуске DSR подготовит окружение и модели автоматически.";
         }
         catch (Exception ex)
         {
