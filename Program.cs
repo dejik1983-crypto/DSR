@@ -1185,19 +1185,49 @@ internal static class Program
         }).ToList();
     }
 
-    internal static string FormatWordReview(IEnumerable<WordReviewEntry> entries)
+    /// <summary>
+    /// Ключ слова для отчёта: буквы без знака ударения, е и ё приравнены, регистр не важен.
+    /// </summary>
+    internal static string ReviewWordKey(string word) => NormalizeWordLetters(word).ToLowerInvariant();
+
+    // Слова, которые уже посмотрены человеком. Отмечаются строками «Проверено [слово]: …»
+    // и остаются в отчёте: пустой отчёт не позволяет вернуться к документу позже.
+    internal static HashSet<string> ReadCheckedWords(string path)
+    {
+        var checkedWords = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (!File.Exists(path)) return checkedWords;
+        try
+        {
+            foreach (var line in File.ReadAllLines(path, Encoding.UTF8))
+            {
+                // «Проверено [слово]: 17.10.2026 13:26» — слово начинается после открывающей скобки.
+                if (!line.StartsWith("Проверено [", StringComparison.Ordinal)) continue;
+                var close = line.IndexOf(']');
+                if (close > 11) checkedWords.Add(ReviewWordKey(line[11..close]));
+            }
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+        return checkedWords;
+    }
+
+    internal static string FormatWordReview(IEnumerable<WordReviewEntry> entries, IReadOnlySet<string>? checkedWords = null)
     {
         var list = entries.ToArray();
         var output = new StringBuilder("Слова для ручной проверки: многосложные слова (два и более слогов) с русскими гласными, в которых после обработки нет явной отметки ударения и нет буквы ё. Односложные слова программа намеренно оставляет без ударения: положение ударения в них однозначно. Такие слова могут быть корректными безударными в записи, неизвестными модели или опечатками; список не утверждает, что каждое слово ошибочно." + Environment.NewLine + Environment.NewLine);
         if (list.Length == 0) return "Многосложных слов без явного ударения и без буквы ё не найдено." + Environment.NewLine;
+        var stamp = DateTime.Now.ToString("dd.MM.yyyy HH:mm");
         foreach (var group in list.GroupBy(item => SplitReviewContext(item.Context).Context))
         {
             output.AppendLine("Фрагмент: " + group.Key);
             output.AppendLine("Не распознаны: " + string.Join(", ", group.Select(item => item.Word)));
             foreach (var item in group)
             {
-                var proposed = UserDictionary.Value.TryGetValue(NormalizeWordLetters(item.Word).ToLowerInvariant(), out var saved) ? saved : item.Word;
+                var proposed = !string.IsNullOrWhiteSpace(item.Proposed) ? item.Proposed
+                    : UserDictionary.Value.TryGetValue(ReviewWordKey(item.Word), out var saved) ? saved : item.Word;
                 output.AppendLine($"Правка [{item.Word}]: {proposed}");
+                if (checkedWords is not null && checkedWords.Contains(ReviewWordKey(item.Word)))
+                    output.AppendLine($"Проверено [{item.Word}]: {stamp}");
             }
             output.AppendLine();
         }
@@ -1437,7 +1467,17 @@ internal static class Program
         return ApplyWordReplacementMapToText(inputPath, outputPath, correctionMap);
     }
 
-    private static int ApplyPatternReplacementMapToText(string inputPath, string outputPath,
+    // Решение принимается один раз на слово, а в тексте оно встречается с разным регистром:
+// «Мальчишка» в начале фразы должно остаться с заглавной буквы, даже если правка сохранена
+// со строчной. Остальные буквы регистр не трогает: «МАЛЬЧИШКА» в заголовке не разбираем.
+internal static string KeepFirstLetterCase(string sourceToken, string corrected)
+{
+    if (sourceToken.Length == 0 || corrected.Length == 0) return corrected;
+    if (!char.IsUpper(sourceToken[0])) return corrected;
+    return char.IsUpper(corrected[0]) ? corrected : char.ToUpperInvariant(corrected[0]) + corrected[1..];
+}
+
+private static int ApplyPatternReplacementMapToText(string inputPath, string outputPath,
         Dictionary<string, WordReviewPatternCorrection> correctionMap,
         HashSet<(string Key, string Context, int ExcludedOccurrence)> excluded)
     {
@@ -1461,7 +1501,7 @@ internal static class Program
                 if (excludedContexts.Any(item => item.Key == key && item.ExcludedOccurrence >= 0 &&
                     string.Equals(item.Context, content, StringComparison.Ordinal) && CountContextOccurrence(content, match.Index, match.Value) == item.ExcludedOccurrence)) return match.Value;
                 replacements++;
-                return correction.Corrected;
+                return KeepFirstLetterCase(match.Value, correction.Corrected);
             });
             lines[i] = updated + ending;
         }
@@ -1482,7 +1522,7 @@ internal static class Program
             var key = NormalizeWordLetters(match.Value).ToLowerInvariant();
             if (!correctionMap.TryGetValue(key, out var corrected)) return match.Value;
             replacements++;
-            return corrected;
+            return KeepFirstLetterCase(match.Value, corrected);
         });
         if (replacements == 0) return 0;
         File.WriteAllBytes(outputPath, EncodeText(updated, sourceBytes));
@@ -1520,7 +1560,7 @@ internal static class Program
                 if (excludedContexts.Any(item => item.Key == key && item.ExcludedOccurrence >= 0 &&
                     string.Equals(item.Context, node.Value, StringComparison.Ordinal) && CountContextOccurrence(node.Value, match.Index, match.Value) == item.ExcludedOccurrence)) return match.Value;
                 replacements++;
-                return correction.Corrected;
+                return KeepFirstLetterCase(match.Value, correction.Corrected);
             });
             if (!string.Equals(updated, node.Value, StringComparison.Ordinal)) node.Value = updated;
         }
@@ -1707,7 +1747,7 @@ internal static class Program
                 var key = NormalizeWordLetters(match.Value).ToLowerInvariant();
                 if (!correctionMap.TryGetValue(key, out var corrected)) return match.Value;
                 replacements++;
-                return corrected;
+                return KeepFirstLetterCase(match.Value, corrected);
             });
             if (!string.Equals(updated, node.Value, StringComparison.Ordinal)) node.Value = updated;
         }
@@ -1932,6 +1972,48 @@ internal static class Program
     internal static string LlmModelsDirectory => Path.Combine(ModelCacheDirectory, "llm");
     internal static string LlmSettingsPath => Path.Combine(DataDirectory, "llm-настройки.json");
     internal static string LlmSuggestionsPath => Path.Combine(DataDirectory, "llm-подсказки.json");
+
+    // --- Возврат к уже прогнанному документу ------------------------------------------------
+    // Отчёт, отредактированный файл и исходная книга последней работы. При следующем запуске
+    // программа подставляет их в поля вкладки «Подготовка», чтобы можно было продолжить
+    // проверку или внести дополнительные правки в тот же документ.
+    internal sealed record LastSession(string Review, string File, string Input)
+    {
+        // Свойство File перекрывает одноимённый класс, поэтому здесь нужен полный путь.
+        internal bool IsUsable => !string.IsNullOrWhiteSpace(Review) && System.IO.File.Exists(Review);
+    }
+
+    internal static string LastSessionPath => Path.Combine(DataDirectory, "последняя-работа.json");
+
+    internal static LastSession? LoadLastSession()
+    {
+        try
+        {
+            if (!File.Exists(LastSessionPath)) return null;
+            return JsonSerializer.Deserialize<LastSession>(File.ReadAllText(LastSessionPath, Encoding.UTF8));
+        }
+        catch (Exception error)
+        {
+            LogError("Чтение последней работы", error);
+            return null;
+        }
+    }
+
+    internal static void SaveLastSession(string? reviewPath, string? outputPath, string? inputPath)
+    {
+        if (string.IsNullOrWhiteSpace(reviewPath)) return;
+        try
+        {
+            Directory.CreateDirectory(DataDirectory);
+            File.WriteAllText(LastSessionPath,
+                JsonSerializer.Serialize(new LastSession(reviewPath!, outputPath ?? string.Empty, inputPath ?? string.Empty), LlmJsonOptions),
+                new UTF8Encoding(false));
+        }
+        catch (Exception error)
+        {
+            LogError("Запись последней работы", error);
+        }
+    }
 
     // Папка выбранной модели. В настройках хранится либо имя папки внутри ресурсы\модели\llm,
     // либо полный путь — тогда модель можно держать где угодно.

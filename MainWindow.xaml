@@ -282,6 +282,8 @@
                                             ToolTip="Открывает вкладку ИИ-доработки: подставляет результат последнего запуска и список нераспознанных слов." />
                                     <Button x:Name="LoadFilesButton" Content="Открыть отчёт и файл"
                                             ToolTip="Загружает указанные отчёт слов и редактируемый файл в список слов." />
+                                    <Button x:Name="ContinueWorkButton" Content="Продолжить работу" IsEnabled="False"
+                                            ToolTip="Открывает документ, который вы проверяли в прошлый раз: отчёт слов и уже отредактированный файл. Правки из отчёта применяются поверх них, поэтому можно вернуться и дополнить старые решения." />
                                 </WrapPanel>
                                 <ProgressBar x:Name="ConversionProgressBar" Height="6" Margin="0,8,0,0" Minimum="0" Maximum="100" Visibility="Collapsed" />
                                 <TextBlock x:Name="StatusText" TextWrapping="Wrap" Margin="0,6,0,0" />
@@ -383,6 +385,9 @@
                                 <Button x:Name="LlmCheckButton" DockPanel.Dock="Right" Content="Подсказки ИИ по контексту" Padding="14,8"
                                         Background="{StaticResource Accent}" Foreground="White" FontWeight="SemiBold"
                                         ToolTip="Выбранный движок предложит ударение для слов, которых нет в словаре. Найденное показывается по каждому слову отдельно и применяется только вручную." />
+                                <CheckBox x:Name="ShowCheckedCheckBox" DockPanel.Dock="Right" VerticalAlignment="Center" Margin="0,0,14,0"
+                                          Content="Показывать проверенные"
+                                          ToolTip="Слова, к которым правка уже применена, отмечены галочкой и по умолчанию скрыты. Снимите галочку, чтобы вернуться к любому из них и изменить решение — сам документ и список слов при этом не теряются." />
                                 <TextBlock Text="Нераспознанные слова" FontWeight="SemiBold" VerticalAlignment="Center" />
                                 <TextBlock Text=" (двойной щёлчок открывает слово на вкладке 3)" Style="{StaticResource Note}" VerticalAlignment="Center" />
                             </DockPanel>
@@ -420,8 +425,11 @@
                                         ToolTip="Крупнее: увеличить шрифт текста и списков" />
                             </StackPanel>
                             <ComboBox x:Name="SortModeComboBox" DockPanel.Dock="Right" Width="180" Margin="8,0,0,6" />
+                            <CheckBox x:Name="ShowCheckedManualCheckBox" DockPanel.Dock="Right" VerticalAlignment="Center" Margin="8,0,0,0"
+                                      Content="Показывать проверенные"
+                                      ToolTip="Слова с уже применённой правкой отмечены галочкой и по умолчанию скрыты. Снимите галочку, чтобы вернуться к любому из них." />
                             <TextBlock Text="Поиск:" VerticalAlignment="Center" Margin="0,0,6,0" />
-                            <TextBox x:Name="SearchTextBox" MinWidth="200" Margin="0,0,0,6" ToolTip="Фильтр по слову или контексту" />
+                            <TextBox x:Name="SearchTextBox" MinWidth="120" Margin="0,0,0,6" ToolTip="Фильтр по слову или контексту" />
                         </DockPanel>
 
                         <Grid Grid.Row="1">
@@ -453,77 +461,89 @@
 
                             <Grid Grid.Column="2" Margin="10,0,0,0">
                                 <Grid.RowDefinitions>
-                                    <RowDefinition Height="Auto" />
-                                    <RowDefinition Height="Auto" />
-                                    <RowDefinition Height="Auto" />
                                     <RowDefinition Height="*" />
-                                    <RowDefinition Height="Auto" />
                                     <RowDefinition Height="Auto" />
                                 </Grid.RowDefinitions>
 
-                                <!-- Рабочие поля остаются скрытыми: написание правится прямо в тексте ниже. -->
-                                <TextBox x:Name="CorrectionTextBox" Visibility="Collapsed" IsTabStop="False" Focusable="False" />
-                                <TextBlock x:Name="ContextTextBlock" Visibility="Collapsed" />
+                                <!-- Рабочая область прокручивается целиком. Так панели не могут
+                                     наехать друг на друга и редактор не исчезает в невысоком окне. -->
+                                <ScrollViewer Grid.Row="0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                                              Padding="0,0,4,0">
+                                    <Grid>
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="Auto" />
+                                        </Grid.RowDefinitions>
 
-                                <Border x:Name="LlmHintPanel" Grid.Row="0" Margin="0,0,0,6" Padding="10,8"
-                                        CornerRadius="6" Background="#FFF6E0" BorderBrush="{StaticResource Accent}"
-                                        BorderThickness="1" Visibility="Collapsed">
-                                    <StackPanel>
-                                        <TextBlock Text="ПОДСКАЗКА ИИ ПО КОНТЕКСТУ" Style="{StaticResource SectionHeader}" Margin="0,0,0,2" />
-                                        <TextBlock x:Name="LlmHintTextBlock" TextWrapping="Wrap" FontSize="14" />
-                                    </StackPanel>
-                                </Border>
+                                        <!-- Рабочие поля остаются скрытыми: написание правится прямо в тексте ниже. -->
+                                        <TextBox x:Name="CorrectionTextBox" Visibility="Collapsed" IsTabStop="False" Focusable="False" />
+                                        <TextBlock x:Name="ContextTextBlock" Visibility="Collapsed" />
 
-                                <StackPanel Grid.Row="1">
-                                    <TextBlock Text="Ударение в слове" Style="{StaticResource SectionHeader}"
-                                               ToolTip="Клик по гласной ставит на неё ударение. Повторный клик по «е»: сначала «ё», потом просто «е» без ударения. Клик по другой гласной переносит ударение туда. «ё» всегда ударная." />
-                                    <WrapPanel x:Name="StressChoicesPanel" Margin="0,2,0,6" />
-                                    <TextBlock x:Name="VowelPanelHint" Style="{StaticResource Note}" Margin="0,0,0,4" Visibility="Collapsed"
-                                               Foreground="#9A5B22"
-                                               ToolTip="Такое бывает в словах древней орфографии, где ударная не гласная." />
-                                </StackPanel>
-
-                                <!-- Редкий случай: ударение падает не на гласную (ѣ, і, ѧ и другие буквы). -->
-                                <StackPanel Grid.Row="2" Margin="0,0,0,6">
-                                    <TextBlock Text="Уникальное ударение" Style="{StaticResource SectionHeader}"
-                                               ToolTip="Кликните по любой букве слова — ударение встанет на неё. Нужно для редких случаев, когда ударная не гласная: «свѣ́тлостію», «мѣ́дъ» и подобные слова древней орфографии." />
-                                    <WrapPanel x:Name="UniqueStressPanel" Margin="0,2,0,0" />
-                                </StackPanel>
-
-                                <Border Grid.Row="3" Background="{StaticResource Paper}" BorderBrush="{StaticResource Rule}"
-                                        BorderThickness="1" CornerRadius="4" Padding="10">
-                                    <DockPanel>
-                                        <TextBlock DockPanel.Dock="Top" Text="Фрагмент текста" FontWeight="SemiBold" Margin="0,0,0,4"
-                                                   ToolTip="Весь текст вокруг проверяемого слова; само слово выделено жирным и с ударением. Буквы слова можно исправить прямо здесь — при нажатии «Да ✓» будет предложено сохранить исправленное написание." />
-                                        <DockPanel DockPanel.Dock="Bottom" Margin="0,6,0,0">
-                                            <Button x:Name="ResetWordButton" DockPanel.Dock="Right" Content="Вернуть исходное слово" Padding="10,5" Margin="8,0,0,0"
-                                                    ToolTip="Отменить правку написания и вернуться к слову из книги." />
-                                            <StackPanel Orientation="Horizontal">
-                                                <TextBlock x:Name="SelectionCountTextBlock" VerticalAlignment="Center" Style="{StaticResource Note}" />
-                                                <TextBlock x:Name="OriginalWordTextBlock" VerticalAlignment="Center" Style="{StaticResource Note}" Margin="14,0,0,0" />
+                                        <Border x:Name="LlmHintPanel" Grid.Row="0" Margin="0,0,0,8" Padding="10,8"
+                                                CornerRadius="6" Background="#FFF6E0" BorderBrush="{StaticResource Accent}"
+                                                BorderThickness="1" Visibility="Collapsed">
+                                            <StackPanel>
+                                                <TextBlock Text="ПОДСКАЗКА ИИ ПО КОНТЕКСТУ" Style="{StaticResource SectionHeader}" Margin="0,0,0,2" />
+                                                <TextBlock x:Name="LlmHintTextBlock" TextWrapping="Wrap" FontSize="14" />
                                             </StackPanel>
-                                        </DockPanel>
-                                        <RichTextBox x:Name="FragmentEditor" BorderThickness="0" Background="Transparent"
-                                                     FontSize="16" AcceptsReturn="False"
-                                                     VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
-                                                     ToolTip="Весь фрагмент текста. Проверяемое слово — жирным и с ударением; буквы слова можно исправить прямо здесь." />
-                                    </DockPanel>
-                                </Border>
+                                        </Border>
 
-                                <Expander Grid.Row="4" Margin="0,8,0,0" Header="Опечатка и дополнительные словоформы"
-                                          ToolTip="Слово с опечаткой правьте прямо в тексте выше — кнопки ударения перестроятся под новое написание. Допускается небольшое число отличий (до 3 букв), чтобы случайно не заменить другое слово. Здесь же можно добавить дополнительные словоформы вручную.">
-                                    <StackPanel Margin="0,6,0,0">
-                                        <ComboBox x:Name="GrammaticalCaseComboBox" Width="260" HorizontalAlignment="Left" Margin="0,0,0,4" />
-                                        <StackPanel x:Name="DeclensionRowsPanel" />
-                                        <Button x:Name="AddFormButton" Content="Добавить словоформу" HorizontalAlignment="Left" />
-                                    </StackPanel>
-                                </Expander>
+                                        <StackPanel Grid.Row="1">
+                                            <TextBlock Text="Ударение в слове" Style="{StaticResource SectionHeader}"
+                                                       ToolTip="Клик по гласной ставит на неё ударение. Повторный клик по «е»: сначала «ё», потом просто «е» без ударения. Клик по другой гласной переносит ударение туда. «ё» всегда ударная." />
+                                            <WrapPanel x:Name="StressChoicesPanel" Margin="0,2,0,6" />
+                                            <TextBlock x:Name="VowelPanelHint" Style="{StaticResource Note}" Margin="0,0,0,4" Visibility="Collapsed"
+                                                       Foreground="#9A5B22" TextWrapping="Wrap"
+                                                       ToolTip="Такое бывает в словах древней орфографии, где ударная не гласная." />
+                                        </StackPanel>
 
-                                <DockPanel Grid.Row="5" Margin="0,8,0,0">
+                                        <!-- Редкий случай: ударение падает не на гласную (ѣ, і, ѧ и другие буквы). -->
+                                        <StackPanel Grid.Row="2" Margin="0,0,0,8">
+                                            <TextBlock Text="Уникальное ударение" Style="{StaticResource SectionHeader}"
+                                                       ToolTip="Кликните по любой букве слова — ударение встанет на неё. Нужно для редких случаев, когда ударная не гласная: «свѣ́тлостію», «мѣ́дъ» и подобные слова древней орфографии." />
+                                            <WrapPanel x:Name="UniqueStressPanel" Margin="0,2,0,0" />
+                                        </StackPanel>
+
+                                        <Border Grid.Row="3" Background="{StaticResource Paper}" BorderBrush="{StaticResource Rule}"
+                                                BorderThickness="1" CornerRadius="4" Padding="10">
+                                            <DockPanel>
+                                                <TextBlock DockPanel.Dock="Top" Text="Фрагмент текста" FontWeight="SemiBold" Margin="0,0,0,4"
+                                                           ToolTip="Весь текст вокруг проверяемого слова; само слово выделено жирным и с ударением. Буквы слова можно исправить прямо здесь — при нажатии «Да ✓» будет предложено сохранить исправленное написание." />
+                                                <DockPanel DockPanel.Dock="Bottom" Margin="0,6,0,0">
+                                                    <Button x:Name="ResetWordButton" DockPanel.Dock="Right" Content="Вернуть исходное слово" Padding="10,5" Margin="8,0,0,0"
+                                                            ToolTip="Отменить правку написания и вернуться к слову из книги." />
+                                                    <StackPanel Orientation="Horizontal">
+                                                        <TextBlock x:Name="SelectionCountTextBlock" VerticalAlignment="Center" Style="{StaticResource Note}" />
+                                                        <TextBlock x:Name="OriginalWordTextBlock" VerticalAlignment="Center" Style="{StaticResource Note}" Margin="14,0,0,0" />
+                                                    </StackPanel>
+                                                </DockPanel>
+                                                <RichTextBox x:Name="FragmentEditor" BorderThickness="0" Background="Transparent"
+                                                             FontSize="16" AcceptsReturn="False" Height="300"
+                                                             VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                                                             ToolTip="Весь фрагмент текста. Проверяемое слово — жирным и с ударением; буквы слова можно исправить прямо здесь." />
+                                            </DockPanel>
+                                        </Border>
+
+                                        <Expander Grid.Row="4" Margin="0,8,0,0" Header="Опечатка и дополнительные словоформы"
+                                                  ToolTip="Слово с опечаткой правьте прямо в тексте выше — кнопки ударения перестроятся под новое написание. Допускается небольшое число отличий (до 3 букв), чтобы случайно не заменить другое слово. Здесь же можно добавить дополнительные словоформы вручную.">
+                                            <StackPanel Margin="0,6,0,0">
+                                                <ComboBox x:Name="GrammaticalCaseComboBox" Width="260" HorizontalAlignment="Left" Margin="0,0,0,4" />
+                                                <StackPanel x:Name="DeclensionRowsPanel" />
+                                                <Button x:Name="AddFormButton" Content="Добавить словоформу" HorizontalAlignment="Left" />
+                                            </StackPanel>
+                                        </Expander>
+                                    </Grid>
+                                </ScrollViewer>
+
+                                <!-- Кнопка «Да ✓» всегда на виду: рабочая область прокручивается, а приём — нет. -->
+                                <DockPanel Grid.Row="1" Margin="0,8,0,0">
                                     <Button x:Name="ConfirmStressButton" DockPanel.Dock="Right" Content="Да ✓" MinWidth="96" Padding="14,8" Margin="8,0,0,0"
                                             Background="{StaticResource Accent}" Foreground="White" FontWeight="SemiBold"
                                             ToolTip="Принять вариант (ударение и/или исправленное написание) и перейти к следующей группе (Ctrl+Enter)" />
-                                    <TextBlock VerticalAlignment="Center" Style="{StaticResource Note}"
+                                    <TextBlock VerticalAlignment="Center" Style="{StaticResource Note}" TextWrapping="Wrap"
                                                Text="Правка применяется ко всей группе точных совпадений слова." />
                                 </DockPanel>
                             </Grid>

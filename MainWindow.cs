@@ -96,6 +96,7 @@ public sealed partial class MainWindow : Window
         _pauseConversion.Click += (_, _) => ToggleConversionPause();
         _stopConversion.Click += (_, _) => StopConversion();
         _reviewWords.Click += (_, _) => OpenWordReview();
+        ContinueWorkButton.Click += ContinueWork_Click;
         UpdateReviewButton();
         _prepareButton.Click += async (_, _) => await PrepareAsync(automatic: false);
         _gpuTest.Click += async (_, _) => await CheckGpuAsync();
@@ -121,6 +122,7 @@ public sealed partial class MainWindow : Window
         Fb2FileTextBox.TextChanged += (_, _) => UpdateDerivedFilePaths();
         InitializeReview(reviewPath, fb2Path);
         if (reviewPath != null || fb2Path != null) ReviewTabs.SelectedIndex = 1;
+        else RestoreLastSession();
     }
 
     /// <summary>
@@ -662,6 +664,7 @@ public sealed partial class MainWindow : Window
             {
                 var reviewPath = Program.ReviewPathFor(output);
                 SetReviewPaths(reviewPath, output);
+                RememberSession();
                 ReviewTabs.SelectedIndex = 1;
                 UpdateReviewButton();
             }
@@ -725,10 +728,82 @@ public sealed partial class MainWindow : Window
 
     private void OpenWordReview()
     {
-        SetReviewPaths(_reviewWords.Tag is ValueTuple<string, string> paths ? paths.Item1 : null,
-            _reviewWords.Tag is ValueTuple<string, string> outputPaths ? outputPaths.Item2 : null);
+        if (_reviewWords.Tag is ValueTuple<string, string> paths) SetReviewPaths(paths.Item1, paths.Item2);
         ReviewTabs.SelectedIndex = 1;
         UpdateReviewButton();
+    }
+
+    /// <summary>
+    /// Подставляет файлы последней работы, чтобы к уже прогнанному документу можно было
+    /// вернуться без поиска отчёта по папке. Список слов при этом не теряется: проверенные
+    /// слова остаются в отчёте и просто помечены галочкой.
+    /// </summary>
+    private void RestoreLastSession()
+    {
+        var session = Program.LoadLastSession();
+        if (session is null || !session.IsUsable)
+        {
+            RefreshContinueWorkButton();
+            return;
+        }
+        if (!string.IsNullOrWhiteSpace(session.Input) && File.Exists(session.Input)) InputTextBox.Text = session.Input;
+        if (!string.IsNullOrWhiteSpace(session.File) && File.Exists(session.File)) Fb2FileTextBox.Text = session.File;
+        ReviewFileTextBox.Text = session.Review;
+        UpdateDerivedFilePaths();
+        RefreshContinueWorkButton();
+        var title = LastSessionTitle();
+        if (title.Length > 0)
+            FileStatusTextBlock.Text = $"Можно вернуться к прошлой работе: {title}. Кнопка «Продолжить: {title}» — на вкладке «Подготовка».";
+    }
+
+    private void RefreshContinueWorkButton()
+    {
+        var session = Program.LoadLastSession();
+        if (session is null || !session.IsUsable)
+        {
+            ContinueWorkButton.IsEnabled = false;
+            ContinueWorkButton.Content = "Продолжить работу";
+            ContinueWorkButton.ToolTip = "Пока нечего продолжать: отчёт слов ещё не создавался. Запустите конвертацию или откройте готовый отчёт кнопкой «Отчёт…».";
+            return;
+        }
+        var title = LastSessionTitle();
+        ContinueWorkButton.IsEnabled = true;
+        ContinueWorkButton.Content = $"Продолжить: {title}";
+        ContinueWorkButton.ToolTip = $"Вернуться к документу «{title}». Отчёт: {session.Review}" +
+            (File.Exists(session.File) ? $"\nПравки в: {session.File}" : "\nОтредактированный файл не найден — укажите его кнопкой «Файл…».");
+    }
+
+    private string LastSessionTitle()
+    {
+        var session = Program.LoadLastSession();
+        if (session is null) return string.Empty;
+        var path = !string.IsNullOrWhiteSpace(session.File) && File.Exists(session.File) ? session.File : session.Review;
+        var title = Path.GetFileNameWithoutExtension(path);
+        // Технические хвосты в названии кнопки только занимают место.
+        foreach (var suffix in new[] { "_corrected", "_проверка-слов", "_ударения" })
+            if (title.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+            {
+                title = title[..^suffix.Length];
+                break;
+            }
+        title = title.Trim();
+        return title.Length <= 34 ? title : title[..33] + "…";
+    }
+
+    private void ContinueWork_Click(object sender, RoutedEventArgs e)
+    {
+        var session = Program.LoadLastSession();
+        if (session is null || !session.IsUsable)
+        {
+            RestoreLastSession();
+            return;
+        }
+        _reviewPath = session.Review;
+        _outputPath = !string.IsNullOrWhiteSpace(session.File) && File.Exists(session.File) ? session.File : null;
+        ReviewFileTextBox.Text = _reviewPath;
+        Fb2FileTextBox.Text = _outputPath ?? string.Empty;
+        SetReviewPaths(_reviewPath, _outputPath);
+        ReviewTabs.SelectedIndex = 2;
     }
 
     private void StopConversion()

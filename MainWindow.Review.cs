@@ -33,6 +33,7 @@ public sealed partial class MainWindow
     private int _selectedSampleIndex = -1;
     private bool _rebuildingSamples;
     private bool _updatingCorrection;
+    private bool _updatingCheckedFilter;
     // Текущее написание слова без знака ударения. Именно к нему привязываются кнопки
     // ударных гласных, поэтому исправление опечатки и расстановка ударения работают вместе.
     private string _workingWord = string.Empty;
@@ -60,6 +61,10 @@ public sealed partial class MainWindow
         Fb2FileTextBox.Text = _outputPath ?? string.Empty;
         SearchTextBox.TextChanged += SearchTextBox_TextChanged;
         SortModeComboBox.SelectionChanged += SortModeComboBox_SelectionChanged;
+        ShowCheckedCheckBox.Checked += ShowCheckedCheckBox_Changed;
+        ShowCheckedCheckBox.Unchecked += ShowCheckedCheckBox_Changed;
+        ShowCheckedManualCheckBox.Checked += ShowCheckedCheckBox_Changed;
+        ShowCheckedManualCheckBox.Unchecked += ShowCheckedCheckBox_Changed;
         WordGroupsListBox.SelectionChanged += WordGroupsListBox_SelectionChanged;
         ContextsListBox.SelectionChanged += ContextsListBox_SelectionChanged;
         CorrectionTextBox.TextChanged += Correction_TextChanged;
@@ -87,6 +92,8 @@ public sealed partial class MainWindow
         UnrecognizedWordsListBox.MouseDoubleClick += (_, _) => JumpToManualReview();
         InitializeLlmEngines();
         PreviewKeyDown += HandleReviewNavigationKey;
+        SizeChanged += (_, _) => FitFragmentEditorHeight();
+        ReviewTabs.SelectionChanged += (_, _) => FitFragmentEditorHeight();
         WordGroupsListBox.PreviewKeyDown += HandleReviewNavigationKey;
         ContextsListBox.PreviewKeyDown += HandleReviewNavigationKey;
         if (_reviewPath != null && File.Exists(_reviewPath)) LoadReviewFiles();
@@ -110,6 +117,7 @@ public sealed partial class MainWindow
     }
 
     // Краткий список нераспознанных слов для вкладки ИИ: без поиска, всегда по частоте.
+    // Проверенные слова по умолчанию скрыты — иначе список быстро превращается в простыню.
     private List<ReviewItem> BuildUnrecognizedItems() =>
         _entries.Select((entry, index) => (entry, index))
             .GroupBy(pair => ExactWordKey(pair.entry.Word), StringComparer.Ordinal)
@@ -118,8 +126,10 @@ public sealed partial class MainWindow
                 var first = group.First();
                 var count = _wordCounts.TryGetValue(first.entry.Word, out var found) ? found : 0;
                 var hint = _llmSuggestions.ContainsKey(ExactWordKey(first.entry.Word)) ? "  ·  есть подсказка ИИ" : "";
-                return new ReviewItem(first.index, $"{first.entry.Word} — {count:N0} вхождений{hint}", first.entry.Word, count);
+                var done = group.Any(pair => pair.entry.Checked);
+                return new ReviewItem(first.index, $"{(done ? "✓ " : "")}{first.entry.Word} — {count:N0} вхождений{hint}", first.entry.Word, count, done);
             })
+            .Where(item => ShowCheckedCheckBox.IsChecked == true || !item.Done)
             .OrderByDescending(item => item.Count)
             .ThenBy(item => item.Word, StringComparer.CurrentCultureIgnoreCase)
             .ToList();
@@ -156,8 +166,10 @@ public sealed partial class MainWindow
                     : _llmRejected.TryGetValue(key, out var rejected)
                         ? string.IsNullOrEmpty(rejected.Raw) ? "  ·  ИИ: нет ответа" : $"  ·  ИИ ответил: {rejected.Raw} (проверьте)"
                         : string.Empty;
-                return new ReviewItem(first.index, $"{first.entry.Word} — {count:N0} вхождений{hint}", first.entry.Word, count);
+                var done = group.Any(pair => pair.entry.Checked);
+                return new ReviewItem(first.index, $"{(done ? "✓ " : "")}{first.entry.Word} — {count:N0} вхождений{hint}", first.entry.Word, count, done);
             })
+            .Where(item => ShowCheckedCheckBox.IsChecked == true || !item.Done)
             .Where(item => string.IsNullOrEmpty(filter) || _entries.Any(entry => ExactWordKey(entry.Word) == ExactWordKey(item.Word) &&
                 (entry.Word.Contains(filter, StringComparison.OrdinalIgnoreCase) || entry.Context.Contains(filter, StringComparison.OrdinalIgnoreCase))));
         return (SortModeComboBox.SelectedIndex == 0
@@ -178,13 +190,63 @@ public sealed partial class MainWindow
         UpdateNavigationState();
     }
 
+    // Редактор фрагмента занимает всю свободную высоту окна. Панели ударения не должны
+// вытеснять текст, который идёт править, а полоса прокрутки появляется только
+// в совсем низком окне.
+private void FitFragmentEditorHeight()
+    {
+        if (ActualHeight <= 0) return;
+        var height = Math.Clamp(ActualHeight - 700, 170, 900);
+        if (Math.Abs(FragmentEditor.Height - height) > 8) FragmentEditor.Height = height;
+    }
+
+    // Запоминает пару «отчёт + редактируемый файл»: к документу можно вернуться
+    // при следующем запуске, в том числе чтобы изменить уже принятые решения.
+    private void RememberSession()
+    {
+        if (string.IsNullOrWhiteSpace(_reviewPath)) return;
+        Program.SaveLastSession(_reviewPath, _outputPath, InputTextBox.Text);
+        RefreshContinueWorkButton();
+    }
+
     private void ChooseReview_Click(object sender, RoutedEventArgs e)
     {
         var dialog = new OpenFileDialog { Title = "Выберите файл нераспознанных слов", Filter = "Отчёт слов (*.txt)|*.txt|Все файлы (*.*)|*.*", CheckFileExists = true };
         if (dialog.ShowDialog(this) != true) return;
         _reviewPath = dialog.FileName;
         ReviewFileTextBox.Text = _reviewPath;
+        // Если рядом уже есть отредактированная копия, продолжаем править её:
+        // иначе новые правки легко применить к исходнику и потерять старые.
+        var corrected = CorrectedSiblingPath(_reviewPath);
+        if (corrected != null)
+        {
+            _outputPath = corrected;
+            Fb2FileTextBox.Text = corrected;
+            FileStatusTextBlock.Text = "Найден уже отредактированный файл, правки пойдут в него:\n" + corrected;
+        }
         LoadReviewFiles();
+        RememberSession();
+    }
+
+    // Отчёт «книга_ударения_проверка-слов.txt» → «книга_ударения_corrected.fb2» рядом с ним.
+    private static string? CorrectedSiblingPath(string reviewPath)
+    {
+        try
+        {
+            var directory = Path.GetDirectoryName(Path.GetFullPath(reviewPath));
+            if (directory == null) return null;
+            var baseName = Path.GetFileNameWithoutExtension(reviewPath);
+            const string marker = "_проверка-слов";
+            if (!baseName.EndsWith(marker, StringComparison.OrdinalIgnoreCase)) return null;
+            var stem = baseName[..^marker.Length];
+            foreach (var extension in new[] { ".fb2", ".txt" })
+            {
+                var candidate = Path.Combine(directory, stem + "_corrected" + extension);
+                if (File.Exists(candidate)) return candidate;
+            }
+        }
+        catch (Exception ex) { Program.LogError("Поиск отредактированного файла рядом с отчётом", ex); }
+        return null;
     }
 
     private void ChooseFb2_Click(object sender, RoutedEventArgs e)
@@ -196,6 +258,7 @@ public sealed partial class MainWindow
         RefreshWordCounts();
         ApplyReviewItems();
         UpdateEditorEnabled();
+        RememberSession();
     }
 
     private void OpenCorrections_Click(object sender, RoutedEventArgs e) => OpenDeclensionFile();
@@ -207,6 +270,24 @@ public sealed partial class MainWindow
     private void LoadFiles_Click(object sender, RoutedEventArgs e) => LoadReviewFiles();
     private void SearchTextBox_TextChanged(object sender, TextChangedEventArgs e) => RebuildGroupList();
     private void SortModeComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e) => RebuildGroupList();
+
+    // Галочка одна на обе вкладки: показывать ли слова с уже применённой правкой.
+    // Значение берём у нажатой галочки, иначе вторая копия тут же отменяет первую.
+    private void ShowCheckedCheckBox_Changed(object sender, RoutedEventArgs e)
+    {
+        if (_updatingCheckedFilter) return;
+        var value = sender is CheckBox box ? box.IsChecked : ShowCheckedCheckBox.IsChecked;
+        _updatingCheckedFilter = true;
+        ShowCheckedCheckBox.IsChecked = value;
+        ShowCheckedManualCheckBox.IsChecked = value;
+        _updatingCheckedFilter = false;
+        ApplyReviewItems();
+        UpdateNavigationState();
+        if (value == true) return;
+        if (WordGroupsListBox.SelectedItem is not ReviewItem selected || !selected.Done) return;
+        // Выбранное слово только что скрылось — переходим на первое неразобранное.
+        if (WordGroupsListBox.Items.Count > 0) WordGroupsListBox.SelectedIndex = 0;
+    }
 
     private async void LlmCheck_Click(object sender, RoutedEventArgs e) => await RunLlmCheckAsync();
 
@@ -712,21 +793,33 @@ public sealed partial class MainWindow
         }
         try
         {
-            _entries.Clear();
-            _entries.AddRange(Program.ReadWordReview(_reviewPath).Select(entry => new MutableReviewEntry(entry)));
+            LoadEntriesFromReport();
             RefreshWordCounts();
             _selectedGroupAnchor = -1;
             _selectedSampleIndex = -1;
             ApplyReviewItems();
-            FileStatusTextBlock.Text = _entries.Count == 0 ? "Отчёт пуст или не содержит слов для проверки." : $"Загружено случаев: {_entries.Count}; точных групп слов: {WordGroupsListBox.Items.Count}. Сортировка: {SortModeComboBox.SelectedItem}.";
+            var pending = _entries.Count(entry => !entry.Checked);
+            FileStatusTextBlock.Text = _entries.Count == 0 ? "Отчёт пуст или не содержит слов для проверки."
+                : $"Загружено случаев: {_entries.Count}; ждут решения: {pending}; точных групп слов: {WordGroupsListBox.Items.Count}. Сортировка: {SortModeComboBox.SelectedItem}." +
+                  (pending == 0 ? " Все слова этого документа уже проверены — снимите галочку «Показывать проверенные», чтобы вернуться к любому из них и изменить решение." : string.Empty);
             WordGroupsListBox.Focusable = true;
             WordGroupsListBox.IsTabStop = true;
             ContextTextBlock.Text = "Выберите группу слова слева: будет отредактирована вся группа.";
             if (WordGroupsListBox.Items.Count > 0) WordGroupsListBox.SelectedIndex = 0;
+            else RebuildStressChoices(); // пустые панели должны подсказывать, что делать дальше
             UpdateEditorEnabled();
             UpdateNavigationState();
         }
         catch (Exception ex) { MessageBox.Show(this, "Не удалось открыть отчёт: " + ex.Message, "Ошибка чтения", MessageBoxButton.OK, MessageBoxImage.Error); }
+    }
+
+    // Читает отчёт целиком и отмечает слова, к которым правка уже применена.
+    private void LoadEntriesFromReport()
+    {
+        _entries.Clear();
+        var checkedWords = Program.ReadCheckedWords(_reviewPath!);
+        foreach (var entry in Program.ReadWordReview(_reviewPath!))
+            _entries.Add(new MutableReviewEntry(entry) { Checked = checkedWords.Contains(Program.ReviewWordKey(entry.Word)) });
     }
 
     private void CorrectionChanged()
@@ -905,6 +998,20 @@ public sealed partial class MainWindow
     private void ApplyGroupCorrection()
     {
         var edited = CollectEditedGroups();
+        if (edited.Count > 0 && (string.IsNullOrWhiteSpace(_reviewPath) || string.IsNullOrWhiteSpace(_outputPath) || !File.Exists(_outputPath)))
+        {
+            MessageBox.Show(this, "Выберите файл отчёта и редактируемый FB2 или TXT.", "Нужны файлы", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+        // Решения сначала записываются в файл правок и только потом читаются из него.
+        // Иначе сохранённые ранее словоформы применялись бы после свежих правок
+        // и возвращали бы к старому виду то, что человек только что изменил.
+        foreach (var group in edited)
+        {
+            Program.SaveUserCorrection(group.Entry.ToEntry(), group.Correction);
+            Program.SaveDeclensionForms(_reviewPath!, group.Entry.ToEntry(),
+                group.Group.Select(item => new Program.DeclensionCorrection(item.Word, group.Correction, "Исходное слово", item.Context)));
+        }
         var savedForms = ReadSavedForms();
         if (edited.Count == 0 && savedForms.Count == 0)
         {
@@ -950,17 +1057,20 @@ public sealed partial class MainWindow
             _wordCounts = Program.CountReviewWordOccurrences(_outputPath, _entries.Select(item => item.Word));
             foreach (var group in edited)
             {
-                group.Entry.Proposed = string.Empty;
-                Program.SaveUserCorrection(group.Entry.ToEntry(), group.Correction);
-                Program.SaveDeclensionForms(_reviewPath!, group.Entry.ToEntry(),
-                    group.Group.Select(item => new Program.DeclensionCorrection(item.Word, group.Correction, "Исходное слово", item.Context)));
-                _entries.RemoveAll(entry => ExactWordKey(entry.Word) == ExactWordKey(group.Entry.Word) && entry.Included);
+                // Слово остаётся в отчёте, но помечается как проверенное: пустой отчёт
+                // нельзя открыть повторно, и в нём пропадала бы история проверки.
+                foreach (var entry in _entries.Where(entry => ExactWordKey(entry.Word) == ExactWordKey(group.Entry.Word)))
+                {
+                    entry.Checked = true;
+                    entry.Proposed = group.Correction;
+                }
             }
-            foreach (var word in edited.Take(edited.Count - 1).Select(group => group.Entry.Word)) SaveRemainingReviewEntries(word);
-            SaveRemainingReviewEntries(string.Empty);
-            if (edited.Count > 0) ReloadReviewEntries();
+            if (edited.Count > 0) SaveReviewState();
+            ApplyReviewItems();
+            UpdateNavigationState();
+            RememberSession();
             UpdateEditorEnabled();
-            FileStatusTextBlock.Text = $"Пакетная правка применена.\nФайл: {_outputPath}\nГрупп слов: {edited.Count}; сохранённых словоформ к применению: {savedForms.Count}; заменено вхождений: {replacements}.";
+            FileStatusTextBlock.Text = $"Пакетная правка применена.\nФайл: {_outputPath}\nГрупп слов: {edited.Count}; сохранённых словоформ к применению: {savedForms.Count}; заменено вхождений: {replacements}.\nОтчёт сохранён: проверенные слова помечены строкой «Проверено», к документу можно вернуться позже.";
             OfferToOpenResultFolders("Правки применены.",
                 _outputPath,
                 Program.FormCorrectionsPathFor(_reviewPath!),
@@ -1042,41 +1152,30 @@ public sealed partial class MainWindow
         }
     }
 
-    private void ReloadReviewEntries()
-    {
-        if (string.IsNullOrWhiteSpace(_reviewPath) || !File.Exists(_reviewPath)) return;
-        var selectedWord = (WordGroupsListBox.SelectedItem as ReviewItem)?.Word;
-        _entries.Clear();
-        _entries.AddRange(Program.ReadWordReview(_reviewPath!).Select(entry => new MutableReviewEntry(entry)));
-        RefreshWordCounts();
-        ApplyReviewItems();
-        var restored = selectedWord == null ? null : WordGroupsListBox.Items.Cast<ReviewItem>().FirstOrDefault(item => ExactWordKey(item.Word) == ExactWordKey(selectedWord));
-        if (restored != null) WordGroupsListBox.SelectedItem = restored;
-        else if (WordGroupsListBox.Items.Count > 0) WordGroupsListBox.SelectedIndex = 0;
-        else
-        {
-            ContextsListBox.ItemsSource = null;
-            StressChoicesPanel.Children.Clear();
-            DeclensionRowsPanel.Children.Clear();
-            _declensions.Clear();
-            CorrectionTextBox.Text = string.Empty;
-            ContextTextBlock.Text = "Все группы обработаны — список слов пуст.";
-        }
-        UpdateNavigationState();
-    }
-
     private void ApplyAllEditedGroups()
     {
         ApplyGroupCorrection();
     }
 
-    private void SaveRemainingReviewEntries(string correctedWord)
+    // Отчёт переписывается целиком: список слов сохраняется, рядом с каждым
+    // уже проверенным словом появляется строка «Проверено [слово]: <дата и время>».
+    private void SaveReviewState()
     {
         if (_reviewPath == null) return;
-        Program.LogReview($"Обновление отчёта {Path.GetFileName(_reviewPath)}: группы слов закреплены");
-        var correctedKey = ExactWordKey(correctedWord);
-        var remaining = _entries.Where(entry => ExactWordKey(entry.Word) != correctedKey || !entry.Included).Select(entry => entry.ToEntry());
-        File.WriteAllText(_reviewPath, Program.FormatWordReview(remaining), new UTF8Encoding(true));
+        try
+        {
+            var checkedWords = _entries.Where(entry => entry.Checked)
+                .Select(entry => Program.ReviewWordKey(entry.Word))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            File.WriteAllText(_reviewPath, Program.FormatWordReview(_entries.Select(entry => entry.ToEntry()), checkedWords), new UTF8Encoding(true));
+            Program.LogReview($"Отчёт {Path.GetFileName(_reviewPath)} сохранён: слов {_entries.Count}, проверено {checkedWords.Count}");
+        }
+        catch (Exception ex)
+        {
+            // Правки к тексту уже применены, поэтому сбой записи отчёта — предупреждение, а не отмена.
+            Program.LogError("Сохранение отчёта нераспознанных слов", ex);
+            FileStatusTextBlock.Text = "Правки применены к файлу, но отчёт не удалось сохранить: " + ex.Message;
+        }
     }
 
     private void CopyGroupText(IEnumerable<MutableReviewEntry> entries)
@@ -1409,6 +1508,9 @@ public sealed partial class MainWindow
             return box;
         }
         var button = new Button { Content = box, ToolTip = tooltip, Style = TryFindResource("LetterButton") as Style };
+        // Имя нужно программам чтения с экрана и автоматическим проверкам: буква сама по себе
+        // как имя бесполезна — непонятно, что нажатие сделает.
+        System.Windows.Automation.AutomationProperties.SetName(button, $"Буква «{glyph}»" + (isStressed ? ", здесь ударение" : ""));
         if (isStressed)
         {
             button.BorderBrush = accent;
@@ -1645,10 +1747,13 @@ public sealed partial class MainWindow
         public int ContextOccurrence => _splitContext.Occurrence;
         public string Proposed { get; set; }
         public bool Included { get; set; } = true;
+        // Слово уже посмотрено человеком и правка к нему применена. Такие слова остаются
+        // в отчёте (иначе документ нельзя будет открыть повторно), но помечаются галочкой.
+        public bool Checked { get; set; }
         public Program.WordReviewEntry ToEntry() => new(Word, $"{Context}\u0001{ContextOccurrence}", Proposed);
     }
 
-    private sealed record ReviewItem(int Index, string Display, string Word, int Count);
+    private sealed record ReviewItem(int Index, string Display, string Word, int Count, bool Done);
 
     private sealed record SampleItem(int Index, string Context, bool Included, string Before, string Exact, string After)
     {
