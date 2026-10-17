@@ -187,7 +187,11 @@
                     ToolTip="Краткая инструкция по всему процессу" />
             <StackPanel>
                 <TextBlock Text="Расстановка ударений и доработка" FontSize="20" FontWeight="SemiBold" Foreground="{StaticResource Ink}" />
-                <TextBlock Text="FB2/TXT → ударения → проверка слов. Исходный файл не изменяется." Style="{StaticResource Note}" />
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="FB2/TXT → ударения → проверка слов. Исходный файл не изменяется." Style="{StaticResource Note}" />
+                    <TextBlock x:Name="VersionText" Style="{StaticResource Note}" Margin="8,0,0,0"
+                               ToolTip="Версия DSR. Обновление версии само запускает подготовку окружения." />
+                </StackPanel>
             </StackPanel>
         </DockPanel>
 

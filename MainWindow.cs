@@ -61,6 +61,9 @@ public sealed partial class MainWindow : Window
     public MainWindow(string? reviewPath, string? fb2Path)
     {
         InitializeComponent();
+        // Версия видна в подзаголовке и в заголовке окна — чтобы её не приходилось искать.
+        VersionText.Text = "версия " + Program.DisplayVersion;
+        Title = $"DSR {Program.DisplayVersion} — ударения в FB2/TXT и доработка после конвертации";
         // Окно не должно быть выше рабочей области экрана: при крупном масштабе
         // заявленные 1280×920 превращаются в пиксели больше экрана, шапка уезжает
         // вверх, и содержимое вкладки наползает на заголовок с вкладками.
@@ -182,10 +185,11 @@ public sealed partial class MainWindow : Window
         var baseText = bytes > 0
             ? $"Выбрана модель омографов: {model}; её файлы (ONNX и токенизатор) занимают {bytes / 1024.0 / 1024:0.0} МБ."
             : $"Выбрана модель омографов: {model}; файлы появятся при загрузке.";
-        // Модель сменилась после подготовки — DSR доготовит её сам при следующем запуске.
+        // Окружение не совпадает с отметкой (новая версия, место, машина или модель) —
+        // DSR подготовит его сам при следующем запуске.
         var pending = PreparationStamp.TryRead() is { } stamp && !stamp.IsValidFor(model);
         _modelStatus.Text = pending
-            ? baseText + " Модель сменилась — окружение подготовится само при следующем запуске (или по кнопке «Подготовка к работе»)."
+            ? baseText + " Окружение для этой модели ещё не подготовлено — DSR подготовит его сам (или по кнопке «Подготовка к работе»)."
             : baseText;
         _ = UpdateResourceSizeStatusAsync();
     }

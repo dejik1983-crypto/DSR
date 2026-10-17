@@ -479,6 +479,17 @@ internal static class Program
         }
     }
 
+    /// <summary>Версия для показа пользователю: без служебного суффикса сборки.</summary>
+    internal static string DisplayVersion
+    {
+        get
+        {
+            var version = AppVersion;
+            var suffix = version.IndexOfAny(new[] { '+', '-' });
+            return suffix > 0 ? version[..suffix] : version;
+        }
+    }
+
     /// <summary>Python из локального окружения рядом с приложением.</summary>
     internal static string EnvironmentPythonPath => Path.Combine(DataDirectory, "python", "Scripts", "python.exe");
 
