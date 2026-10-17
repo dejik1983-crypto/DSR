@@ -89,11 +89,14 @@ public sealed partial class MainWindow
         FontLargerButton.Click += (_, _) => ChangeReviewFontSize(2);
         FontSmallerButton.Click += (_, _) => ChangeReviewFontSize(-2);
         LlmCheckButton.Click += LlmCheck_Click;
+        LlmRecheckButton.Click += LlmRecheck_Click;
+        UniqueStressToggle.Checked += UniqueStressToggle_Changed;
+        UniqueStressToggle.Unchecked += UniqueStressToggle_Changed;
         UnrecognizedWordsListBox.MouseDoubleClick += (_, _) => JumpToManualReview();
         InitializeLlmEngines();
         PreviewKeyDown += HandleReviewNavigationKey;
-        SizeChanged += (_, _) => FitFragmentEditorHeight();
-        ReviewTabs.SelectionChanged += (_, _) => FitFragmentEditorHeight();
+        SizeChanged += (_, _) => FitWindowLayoutSoon();
+        ReviewTabs.SelectionChanged += (_, _) => FitWindowLayout();
         WordGroupsListBox.PreviewKeyDown += HandleReviewNavigationKey;
         ContextsListBox.PreviewKeyDown += HandleReviewNavigationKey;
         if (_reviewPath != null && File.Exists(_reviewPath)) LoadReviewFiles();
@@ -190,14 +193,32 @@ public sealed partial class MainWindow
         UpdateNavigationState();
     }
 
-    // Редактор фрагмента занимает всю свободную высоту окна. Панели ударения не должны
-// вытеснять текст, который идёт править, а полоса прокрутки появляется только
-// в совсем низком окне.
-private void FitFragmentEditorHeight()
+    // Размер меняется раньше, чем станут известны новые размеры элементов, поэтому пересчёт
+    // повторяется после раскладки — иначе остались бы прежние высоты.
+    private void FitWindowLayoutSoon()
     {
-        if (ActualHeight <= 0) return;
-        var height = Math.Clamp(ActualHeight - 700, 170, 900);
-        if (Math.Abs(FragmentEditor.Height - height) > 8) FragmentEditor.Height = height;
+        FitWindowLayout();
+        Dispatcher.BeginInvoke(new Action(FitWindowLayout));
+    }
+
+    // Шапке и строке статуса задаётся точная высота: вкладка при нехватке места
+    // поджимает строки-авто, и её содержимое наезжает на шапку. Желаемая высота
+    // (DesiredSize) не зависит от текущей раскладки, поэтому пересчёт безопасен.
+    private void FitWindowLayout()
+    {
+        var headerHeight = Math.Ceiling(HeaderPanel.DesiredSize.Height);
+        if (headerHeight > 0 && Math.Abs(HeaderRow.Height.Value - headerHeight) > 0.5)
+            HeaderRow.Height = new GridLength(headerHeight);
+        var statusHeight = Math.Ceiling(StatusPanel.DesiredSize.Height);
+        if (statusHeight > 0 && Math.Abs(StatusRow.Height.Value - statusHeight) > 0.5)
+            StatusRow.Height = new GridLength(statusHeight);
+        // Редактор фрагмента занимает всю оставшуюся высоту вкладки: панели ударения
+        // не должны вытеснять текст, который идёт править. 360 — это панель ударения,
+        // заголовок и подвал редактора, блок словоформ и строка с кнопкой «Да ✓».
+        var tabsHeight = ReviewTabs.ActualHeight;
+        if (tabsHeight <= 0) return;
+        var editorHeight = Math.Clamp(tabsHeight - 360, 140, 900);
+        if (Math.Abs(FragmentEditor.Height - editorHeight) > 4) FragmentEditor.Height = editorHeight;
     }
 
     // Запоминает пару «отчёт + редактируемый файл»: к документу можно вернуться
@@ -290,6 +311,43 @@ private void FitFragmentEditorHeight()
     }
 
     private async void LlmCheck_Click(object sender, RoutedEventArgs e) => await RunLlmCheckAsync();
+
+    // Кнопка УНИК открывает панель ударения по любой букве. Нужна она редко — для слов
+    // древней орфографии, где ударная не гласная, — поэтому по умолчанию скрыта.
+    private void UniqueStressToggle_Changed(object sender, RoutedEventArgs e)
+    {
+        var enabled = UniqueStressToggle.IsChecked == true;
+        UniqueStressPanelBox.Visibility = enabled ? Visibility.Visible : Visibility.Collapsed;
+        if (!enabled)
+        {
+            UniqueStressPanel.Children.Clear();
+            return;
+        }
+        RebuildUniqueStressChoices();
+        FileStatusTextBlock.Text = "Режим «уникальное ударение»: кликните по любой букве слова. Кнопка УНИК снова выключит панель.";
+    }
+
+    // Повторный запрос по уже проверенной книге: модель могла обновиться или смениться,
+    // а прежние ответы остались бы в кэше и повтор их не тронул бы.
+    private async void LlmRecheck_Click(object sender, RoutedEventArgs e)
+    {
+        if (_entries.Count == 0)
+        {
+            MessageBox.Show(this, "Откройте отчёт со словами — перепроверять пока нечего.", "Нечего проверять", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        var words = _entries.Select(entry => entry.Word).Distinct(StringComparer.Ordinal).Count();
+        var checkedWords = _entries.Count(entry => entry.Checked);
+        if (MessageBox.Show(this,
+                $"Перепроверить заново {words:N0} слов движком «{_llmEngine.Title}»?\n\n" +
+                (checkedWords > 0
+                    ? $"Из них {checkedWords:N0} уже проверены — их решения никуда не денутся, но новые ответы ИИ могут оказаться другими.\n"
+                    : string.Empty) +
+                "Прежние ответы ИИ по этим словам будут заменены. На текст ничего не применяется: каждое слово подтверждается отдельно кнопкой «Да ✓».\n\n" +
+                "Проход может занять несколько минут.",
+                "Перепроверка с помощью ИИ", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
+        await RunLlmCheckAsync(recheck: true);
+    }
 
     // --- Движок подсказок: своя модель на диске, свой сервер Ollama или внешний API ----------
     // Настройки сохраняются сразу при изменении: их читают и окно, и командная строка.
@@ -505,7 +563,7 @@ private void FitFragmentEditorHeight()
     // Локальный ИИ-проход по контексту. Языковая модель на этом же компьютере (или внешний сервис)
     // подбирает ударение для слов, которых нет ни в словаре RUAccent, ни в пользовательских
     // ударениях. Результат — только подсказки: каждая принимается отдельно кнопкой «Да».
-    private async Task RunLlmCheckAsync()
+    private async Task RunLlmCheckAsync(bool recheck = false)
     {
         if (string.IsNullOrWhiteSpace(_reviewPath) || !File.Exists(_reviewPath))
         {
@@ -525,7 +583,23 @@ private void FitFragmentEditorHeight()
         var book = !string.IsNullOrWhiteSpace(_outputPath) ? _outputPath! : _reviewPath!;
         var cache = Program.LoadLlmSuggestions();
         var failures = Program.LoadLlmFailures();
-        var reuse = LlmReuseCheckBox.IsChecked == true;
+        var reuse = LlmReuseCheckBox.IsChecked == true && !recheck;
+        // Перепроверка — осознанный повторный запрос по всем словам: модель могла обновиться
+        // или смениться, а прежний ответ мог быть сделан другой версией. Старые ответы,
+        // в том числе из кэша, выбрасываются — иначе повтор вернул бы то же самое.
+        if (recheck)
+        {
+            foreach (var group in groups)
+            {
+                var word = group[0].Word;
+                var key = ExactWordKey(word);
+                _llmSuggestions.Remove(key);
+                _llmRejected.Remove(key);
+                cache.Remove(Program.LlmCacheKey(_llmEngine.Id, book, word));
+                failures.Remove(Program.LlmCacheKey(_llmEngine.Id, book, word));
+            }
+            Program.LogReview($"Перепроверка ИИ по {_llmEngine.Title}: слов {groups.Count}, книга {Path.GetFileName(book)}");
+        }
         var pending = new List<Program.LlmStressItem>();
         var reused = 0;
         var skipped = 0;
@@ -565,6 +639,7 @@ private void FitFragmentEditorHeight()
         if (pending.Count > 0)
         {
             LlmCheckButton.IsEnabled = false;
+            LlmRecheckButton.IsEnabled = false;
             var progress = new LlmProgressWindow();
             progress.Owner = this;
             progress.Show();
@@ -614,6 +689,7 @@ private void FitFragmentEditorHeight()
             {
                 progress.Close();
                 LlmCheckButton.IsEnabled = true;
+                LlmRecheckButton.IsEnabled = true;
             }
         }
 
@@ -631,6 +707,14 @@ private void FitFragmentEditorHeight()
         var summary = $"Подсказок ИИ: {_llmSuggestions.Count} (групп слов {groups.Count}"
             + (reused > 0 ? $", из кэша {reused}" : string.Empty)
             + (skipped > 0 ? $", без ответа ранее {skipped}" : string.Empty) + $"; движок {_llmEngine.Title}).";
+        // Ответы по уже проверенным словам не видны в списке: подсказываем, где их искать.
+        var checkedWithSuggestion = _entries.Count(entry => entry.Checked && _llmSuggestions.ContainsKey(ExactWordKey(entry.Word)));
+        if (checkedWithSuggestion > 0 && ShowCheckedCheckBox.IsChecked != true)
+        {
+            ShowCheckedCheckBox.IsChecked = true;
+            summary += Environment.NewLine +
+                $"Показаны и уже проверенные слова: в {checkedWithSuggestion} из них ИИ предложил другой вариант.";
+        }
         FileStatusTextBlock.Text = _llmStatus.Length > 0
             ? summary + Environment.NewLine + _llmStatus
             : summary + Environment.NewLine + "Подсказка видна сверху над полем «Исправленный вариант»; подтверждайте по одной кнопкой «Да».";
@@ -1427,7 +1511,8 @@ private void FitFragmentEditorHeight()
         // Показываем слово целиком: в маленьком шрифте «ѣ» легко спутать с «ь».
         VowelPanelHint.Text = accentPosition >= 0 && accentPosition < word.Length
             ? "Редкий случай: ударение стоит на «" + word[..(accentPosition + 1)] + "\u0301" + word[(accentPosition + 1)..] +
-              "» — на букве, которой нет среди гласных. Так и задумано."
+              "» — на букве, которой нет среди гласных. Так и задумано." +
+              (UniqueStressToggle.IsChecked == true ? string.Empty : " Поставить такое ударение можно кнопкой УНИК.")
             : string.Empty;
     }
 
@@ -1476,7 +1561,10 @@ private void FitFragmentEditorHeight()
     private void RebuildStressChoices()
     {
         RebuildVowelChoices();
-        RebuildUniqueStressChoices();
+        // Панель УНИК строится только когда включена: нужна она для считанных слов,
+        // а перестраивать её на каждое переключение слова незачем.
+        if (UniqueStressToggle.IsChecked == true) RebuildUniqueStressChoices();
+        else UniqueStressPanel.Children.Clear();
     }
 
     private UIElement WordLetter(string glyph, string? mark, bool isVowel, bool isStressed, string? tooltip, Action? click)

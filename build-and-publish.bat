@@ -101,13 +101,34 @@ if errorlevel 1 (
 echo Executable smoke test passed.
 
 rem Restore directories from the previous publish that are not part of the fresh build
-rem (the runtime data folder). Names are taken from the file system, so no encoding issues.
+rem (the runtime data folder with python and models). Names are taken from the file system,
+rem so no encoding issues.
+rem First drop the runtime folder if the fresh build or its smoke test created one: otherwise
+rem it would look like "already present", the real folder would not be restored, and the
+rem models would be deleted together with publish.old.
+for /d %%D in ("%PUBLISH_DIR%\*") do (
+    if exist "%%D\ruaccent_worker.py" rmdir /s /q "%%D"
+)
 if exist "%OLD_PUBLISH%" (
     if not exist "%PUBLISH_DIR%" mkdir "%PUBLISH_DIR%"
+    if exist "%PUBLISH_DIR%\.restore-ok" del "%PUBLISH_DIR%\.restore-ok"
     for /d %%D in ("%OLD_PUBLISH%\*") do (
-        if not exist "%PUBLISH_DIR%\%%~nxD" move "%%D" "%PUBLISH_DIR%\" >nul
+        if not exist "%PUBLISH_DIR%\%%~nxD" (
+            move "%%D" "%PUBLISH_DIR%\" >nul 2>nul
+            if errorlevel 1 echo failed>>"%PUBLISH_DIR%\.restore-ok"
+        )
     )
-    rmdir /s /q "%OLD_PUBLISH%"
+    set "RESTORE_INCOMPLETE=0"
+    if exist "%PUBLISH_DIR%\.restore-ok" set "RESTORE_INCOMPLETE=1"
+    if exist "%PUBLISH_DIR%\.restore-ok" del "%PUBLISH_DIR%\.restore-ok"
+    if "%RESTORE_INCOMPLETE%"=="1" (
+        echo WARNING: not everything from the previous build could be moved back.
+        echo          The previous build is kept in "%OLD_PUBLISH%" - do not delete it
+        echo          until ресурсы\python and ресурсы\модели are back in "%PUBLISH_DIR%".
+        echo          Usually a leftover python.exe is holding files: close DSR and retry.
+    ) else (
+        rmdir /s /q "%OLD_PUBLISH%"
+    )
 )
 
 :finish

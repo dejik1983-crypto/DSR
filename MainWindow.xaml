@@ -36,6 +36,35 @@
                 </Setter.Value>
             </Setter>
         </Style>
+        <!-- Переключатель «УНИК»: тот же вид, что у кнопок, но с заметным включённым состоянием. -->
+        <Style TargetType="ToggleButton">
+            <Setter Property="Background" Value="{StaticResource Card}" />
+            <Setter Property="Foreground" Value="{StaticResource Ink}" />
+            <Setter Property="BorderBrush" Value="{StaticResource Rule}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Padding" Value="10,4" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ToggleButton">
+                        <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="4" Padding="2">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter Property="Background" Value="{StaticResource Accent}" />
+                                <Setter Property="Foreground" Value="White" />
+                                <Setter Property="BorderBrush" Value="{StaticResource Accent}" />
+                            </Trigger>
+                            <Trigger Property="IsMouseOver" Value="True"><Setter Property="BorderBrush" Value="#8B5734" /></Trigger>
+                            <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.52" /><Setter Property="Cursor" Value="Arrow" /></Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
         <Style TargetType="TextBox">
             <Setter Property="Background" Value="{StaticResource Card}" />
             <Setter Property="Foreground" Value="{StaticResource Ink}" />
@@ -175,14 +204,18 @@
         </DataTemplate>
     </Window.Resources>
 
+    <!-- Шапка и строка статуса получают фиксированную высоту (см. FitWindowLayout): при
+         крупном масштабе шрифтов или маленьком экране вкладка поджимает их, и содержимое
+         шапки «Расстановка ударений и доработка» оказывается под вкладкой. Фиксированные
+         строки уступают место вкладкам, а не наоборот. -->
     <Grid Margin="14" Background="{StaticResource Paper}">
         <Grid.RowDefinitions>
-            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" x:Name="HeaderRow" />
             <RowDefinition Height="*" />
-            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" x:Name="StatusRow" />
         </Grid.RowDefinitions>
 
-        <DockPanel Grid.Row="0" Margin="0,0,0,8">
+        <DockPanel x:Name="HeaderPanel" Grid.Row="0" Margin="0,0,0,8" ClipToBounds="True">
             <Button x:Name="HelpButton" DockPanel.Dock="Right" Content="Как это работает?" Padding="10,5" VerticalAlignment="Top"
                     ToolTip="Краткая инструкция по всему процессу" />
             <StackPanel>
@@ -385,6 +418,8 @@
                                 <Button x:Name="LlmCheckButton" DockPanel.Dock="Right" Content="Подсказки ИИ по контексту" Padding="14,8"
                                         Background="{StaticResource Accent}" Foreground="White" FontWeight="SemiBold"
                                         ToolTip="Выбранный движок предложит ударение для слов, которых нет в словаре. Найденное показывается по каждому слову отдельно и применяется только вручную." />
+                                <Button x:Name="LlmRecheckButton" DockPanel.Dock="Right" Content="Перепроверить с помощью ИИ" Padding="14,8" Margin="0,0,8,0"
+                                        ToolTip="Спрашивает движок заново по всем словам отчёта, включая уже проверенные, и забывает прежние ответы. Нужно, когда модель обновилась или сменилась: обычный проход берёт прежние ответы из кэша и ничего не меняет." />
                                 <CheckBox x:Name="ShowCheckedCheckBox" DockPanel.Dock="Right" VerticalAlignment="Center" Margin="0,0,14,0"
                                           Content="Показывать проверенные"
                                           ToolTip="Слова, к которым правка уже применена, отмечены галочкой и по умолчанию скрыты. Снимите галочку, чтобы вернуться к любому из них и изменить решение — сам документ и список слов при этом не теряются." />
@@ -492,16 +527,21 @@
                                         </Border>
 
                                         <StackPanel Grid.Row="1">
-                                            <TextBlock Text="Ударение в слове" Style="{StaticResource SectionHeader}"
-                                                       ToolTip="Клик по гласной ставит на неё ударение. Повторный клик по «е»: сначала «ё», потом просто «е» без ударения. Клик по другой гласной переносит ударение туда. «ё» всегда ударная." />
+                                            <Grid>
+                                                <TextBlock Text="Ударение в слове" Style="{StaticResource SectionHeader}"
+                                                           ToolTip="Клик по гласной ставит на неё ударение. Повторный клик по «е»: сначала «ё», потом просто «е» без ударения. Клик по другой гласной переносит ударение туда. «ё» всегда ударная." />
+                                                <ToggleButton x:Name="UniqueStressToggle" Content="УНИК" HorizontalAlignment="Right" VerticalAlignment="Top"
+                                                              ToolTip="Редкий случай: клик по любой букве слова ставит ударение на неё. Нужно для слов вроде «свѣ́тлостію», «мѣ́дъ», где ударная не гласная. Пока кнопка выключена, панель под ней не показывается." />
+                                            </Grid>
                                             <WrapPanel x:Name="StressChoicesPanel" Margin="0,2,0,6" />
                                             <TextBlock x:Name="VowelPanelHint" Style="{StaticResource Note}" Margin="0,0,0,4" Visibility="Collapsed"
                                                        Foreground="#9A5B22" TextWrapping="Wrap"
                                                        ToolTip="Такое бывает в словах древней орфографии, где ударная не гласная." />
                                         </StackPanel>
 
-                                        <!-- Редкий случай: ударение падает не на гласную (ѣ, і, ѧ и другие буквы). -->
-                                        <StackPanel Grid.Row="2" Margin="0,0,0,8">
+                                        <!-- Редкий случай: ударение падает не на гласную (ѣ, і, ѧ и другие буквы).
+                                             Показывается только при включённой кнопке УНИК: нужна она для считанных слов. -->
+                                        <StackPanel x:Name="UniqueStressPanelBox" Grid.Row="2" Margin="0,0,0,8" Visibility="Collapsed">
                                             <TextBlock Text="Уникальное ударение" Style="{StaticResource SectionHeader}"
                                                        ToolTip="Кликните по любой букве слова — ударение встанет на неё. Нужно для редких случаев, когда ударная не гласная: «свѣ́тлостію», «мѣ́дъ» и подобные слова древней орфографии." />
                                             <WrapPanel x:Name="UniqueStressPanel" Margin="0,2,0,0" />
@@ -561,7 +601,7 @@
             </TabItem>
         </TabControl>
 
-        <Border Grid.Row="2" Margin="0,8,0,0" Background="{StaticResource Card}" BorderBrush="{StaticResource Rule}"
+        <Border x:Name="StatusPanel" Grid.Row="2" Margin="0,8,0,0" Background="{StaticResource Card}" BorderBrush="{StaticResource Rule}"
                 BorderThickness="1" CornerRadius="6" Padding="10,4">
             <ScrollViewer VerticalScrollBarVisibility="Auto" MaxHeight="60">
                 <TextBlock x:Name="FileStatusTextBlock" TextWrapping="Wrap" Foreground="{StaticResource Ink}"
