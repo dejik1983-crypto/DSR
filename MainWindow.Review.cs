@@ -742,7 +742,7 @@ public sealed partial class MainWindow
         if (lettersChanged)
         {
             _updatingCorrection = true;
-            RebuildVowelChoices();
+            RebuildStressChoices();
             _updatingCorrection = false;
             ContextTextBlock.Text = "Написание изменено (исправление опечатки). Теперь выберите ударную гласную — ударение встанет на исправленное слово.";
         }
@@ -1178,7 +1178,7 @@ public sealed partial class MainWindow
         DeclensionRowsPanel.Children.Clear();
         _declensions.Clear();
         _workingWord = PlainLetters(CorrectionTextBox.Text);
-        RebuildVowelChoices();
+        RebuildStressChoices();
         OriginalWordTextBlock.Text = $"Исходное слово: {selectedEntry.Word}";
         LoadSavedForms(selectedEntry);
         if (_declensions.Count == 0) AddDeclensionRow(selectedEntry.Word);
@@ -1315,6 +1315,69 @@ public sealed partial class MainWindow
                     : "Клик — поставить ударение на эту гласную. Ещё клик — снять ударение.",
                 () => ApplyVowelClick(captured)));
         }
+        UpdateVowelPanelHint(word, accentPosition);
+    }
+
+    // Ударение может стоять не на гласной (см. «Уникальное ударение»). В верхней панели
+    // его тогда не видно — предупреждаем, чтобы это не выглядело как ошибка.
+    private void UpdateVowelPanelHint(string word, int accentPosition)
+    {
+        var onVowel = accentPosition >= 0 && accentPosition < word.Length &&
+                      Vowels.Contains(char.ToLowerInvariant(word[accentPosition]));
+        VowelPanelHint.Visibility = accentPosition < 0 || onVowel ? Visibility.Collapsed : Visibility.Visible;
+        // Показываем слово целиком: в маленьком шрифте «ѣ» легко спутать с «ь».
+        VowelPanelHint.Text = accentPosition >= 0 && accentPosition < word.Length
+            ? "Редкий случай: ударение стоит на «" + word[..(accentPosition + 1)] + "\u0301" + word[(accentPosition + 1)..] +
+              "» — на букве, которой нет среди гласных. Так и задумано."
+            : string.Empty;
+    }
+
+    /// <summary>
+    /// Редкий случай: ударение не на гласной, а на ѣ, і, ѧ или другой букве древней
+    /// орфографии («свѣ́тлостію», «мѣ́дъ»). Кликабельна любая буква слова.
+    /// </summary>
+    private void RebuildUniqueStressChoices()
+    {
+        UniqueStressPanel.Children.Clear();
+        var word = _workingWord;
+        if (string.IsNullOrEmpty(word))
+        {
+            UniqueStressPanel.Children.Add(new TextBlock
+            {
+                Text = "Выберите слово в списке слева.",
+                Foreground = TryFindResource("MutedInk") as Brush ?? Brushes.Gray,
+            });
+            return;
+        }
+        var accentPosition = CorrectionTextBox.Text.IndexOf('\u0301') - 1;
+        foreach (var (letter, position) in word.Select((ch, index) => (ch, index)))
+        {
+            var captured = position;
+            var isYo = char.ToLowerInvariant(letter) == 'ё';
+            UniqueStressPanel.Children.Add(WordLetter(letter.ToString(), null, isVowel: true, isStressed: accentPosition == position,
+                isYo ? "«ё» всегда ударная — отдельный знак ударения не нужен." : "Поставить ударение на эту букву.",
+                isYo ? null : () => SetStressOnAnyLetter(captured)));
+        }
+    }
+
+    private void SetStressOnAnyLetter(int position)
+    {
+        if (_updatingCorrection) return;
+        var word = _workingWord;
+        if (position < 0 || position >= word.Length) return;
+        if (char.ToLowerInvariant(word[position]) == 'ё')
+        {
+            SetWorkingCorrection(word, "«ё» всегда ударная — отдельный знак ударения не нужен.");
+            return;
+        }
+        SetWorkingCorrection(word.Insert(position + 1, "\u0301"), string.Empty);
+    }
+
+    // Обе панели ударения показывают одно и то же слово, поэтому перестраиваются вместе.
+    private void RebuildStressChoices()
+    {
+        RebuildVowelChoices();
+        RebuildUniqueStressChoices();
     }
 
     private UIElement WordLetter(string glyph, string? mark, bool isVowel, bool isStressed, string? tooltip, Action? click)
@@ -1395,9 +1458,9 @@ public sealed partial class MainWindow
     private void SetWorkingCorrection(string value, string note)
     {
         CorrectionTextBox.Text = value;
-        // Знак ударения буквы не меняет, поэтому панель перестраиваем всегда.
+        // Знак ударения буквы не меняет, поэтому панели перестраиваем всегда.
         _workingWord = PlainLetters(value);
-        RebuildVowelChoices();
+        RebuildStressChoices();
         if (note.Length > 0) FileStatusTextBlock.Text = note;
     }
 
@@ -1450,7 +1513,7 @@ public sealed partial class MainWindow
         _updatingCorrection = true;
         CorrectionTextBox.Text = restored;
         _workingWord = PlainLetters(entry.Word);
-        RebuildVowelChoices();
+        RebuildStressChoices();
         _updatingCorrection = false;
         foreach (var item in GetSelectedGroup()) item.Proposed = restored;
         OriginalWordTextBlock.Text = $"Исходное слово: {entry.Word}";

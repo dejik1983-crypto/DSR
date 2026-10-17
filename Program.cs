@@ -1254,10 +1254,18 @@ internal static class Program
         if (accents > 1) return false;
         if (accents == 0) return word.Contains('ё', StringComparison.OrdinalIgnoreCase);
         var index = word.IndexOf('\u0301');
-        if (index == 0 || !"аеёиоуыэюяАЕЁИОУЫЭЮЯ".Contains(word[index - 1])) return false;
+        if (index == 0) return false;
+        var stressed = word[index - 1];
+        // Обычно ударение падает на гласную. Но в древнерусской и церковнославянской
+        // орфографии ударной может быть и ѣ, ѧ, і и другие буквы вне современного алфавита
+        // («свѣ́тлостію», «мѣ́дъ»), поэтому разрешаем знак ударения после любой кириллической буквы.
+        if (!IsCyrillicLetter(stressed)) return false;
         // Ё is inherently stressed and does not take a separate acute mark.
-        return char.ToLowerInvariant(word[index - 1]) != 'ё';
+        return char.ToLowerInvariant(stressed) != 'ё';
     }
+
+    private static bool IsCyrillicLetter(char ch) =>
+        ch is >= 'Ѐ' and <= 'ӿ' or >= 'а' and <= 'я' or >= 'А' and <= 'Я';
 
     internal static List<DeclensionCorrection> ReadDeclensionForms(string reviewPath, string word)
     {

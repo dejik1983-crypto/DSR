@@ -455,6 +455,7 @@
                                 <Grid.RowDefinitions>
                                     <RowDefinition Height="Auto" />
                                     <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
                                     <RowDefinition Height="*" />
                                     <RowDefinition Height="Auto" />
                                     <RowDefinition Height="Auto" />
@@ -477,9 +478,19 @@
                                     <TextBlock Text="Ударение в слове" Style="{StaticResource SectionHeader}"
                                                ToolTip="Клик по гласной ставит на неё ударение. Повторный клик по «е»: сначала «ё», потом просто «е» без ударения. Клик по другой гласной переносит ударение туда. «ё» всегда ударная." />
                                     <WrapPanel x:Name="StressChoicesPanel" Margin="0,2,0,6" />
+                                    <TextBlock x:Name="VowelPanelHint" Style="{StaticResource Note}" Margin="0,0,0,4" Visibility="Collapsed"
+                                               Foreground="#9A5B22"
+                                               ToolTip="Такое бывает в словах древней орфографии, где ударная не гласная." />
                                 </StackPanel>
 
-                                <Border Grid.Row="2" Background="{StaticResource Paper}" BorderBrush="{StaticResource Rule}"
+                                <!-- Редкий случай: ударение падает не на гласную (ѣ, і, ѧ и другие буквы). -->
+                                <StackPanel Grid.Row="2" Margin="0,0,0,6">
+                                    <TextBlock Text="Уникальное ударение" Style="{StaticResource SectionHeader}"
+                                               ToolTip="Кликните по любой букве слова — ударение встанет на неё. Нужно для редких случаев, когда ударная не гласная: «свѣ́тлостію», «мѣ́дъ» и подобные слова древней орфографии." />
+                                    <WrapPanel x:Name="UniqueStressPanel" Margin="0,2,0,0" />
+                                </StackPanel>
+
+                                <Border Grid.Row="3" Background="{StaticResource Paper}" BorderBrush="{StaticResource Rule}"
                                         BorderThickness="1" CornerRadius="4" Padding="10">
                                     <DockPanel>
                                         <TextBlock DockPanel.Dock="Top" Text="Фрагмент текста" FontWeight="SemiBold" Margin="0,0,0,4"
@@ -499,7 +510,7 @@
                                     </DockPanel>
                                 </Border>
 
-                                <Expander Grid.Row="3" Margin="0,8,0,0" Header="Опечатка и дополнительные словоформы"
+                                <Expander Grid.Row="4" Margin="0,8,0,0" Header="Опечатка и дополнительные словоформы"
                                           ToolTip="Слово с опечаткой правьте прямо в тексте выше — кнопки ударения перестроятся под новое написание. Допускается небольшое число отличий (до 3 букв), чтобы случайно не заменить другое слово. Здесь же можно добавить дополнительные словоформы вручную.">
                                     <StackPanel Margin="0,6,0,0">
                                         <ComboBox x:Name="GrammaticalCaseComboBox" Width="260" HorizontalAlignment="Left" Margin="0,0,0,4" />
@@ -508,7 +519,7 @@
                                     </StackPanel>
                                 </Expander>
 
-                                <DockPanel Grid.Row="4" Margin="0,8,0,0">
+                                <DockPanel Grid.Row="5" Margin="0,8,0,0">
                                     <Button x:Name="ConfirmStressButton" DockPanel.Dock="Right" Content="Да ✓" MinWidth="96" Padding="14,8" Margin="8,0,0,0"
                                             Background="{StaticResource Accent}" Foreground="White" FontWeight="SemiBold"
                                             ToolTip="Принять вариант (ударение и/или исправленное написание) и перейти к следующей группе (Ctrl+Enter)" />

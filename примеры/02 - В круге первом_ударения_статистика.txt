@@ -1,0 +1,25 @@
+﻿DSR — отчёт конвертации и диагностики
+Дата начала: 2026-10-17 12:09:07 +03:00
+Дата завершения отчёта: 2026-10-17 12:11:30 +03:00
+Статус: Завершено
+Вход: F:\DeepReader\DeepReader DSR\DSR\примеры\02 - В круге первом.fb2
+Выход: F:\DeepReader\DeepReader DSR\DSR\примеры\02 - В круге первом_ударения.fb2
+Формат: .FB2
+Модель: turbo3.1; устройство: CUDA
+Входной объём: 3498153 байт (3,336 МБ)
+Выходной объём: 3844951 байт (3,667 МБ)
+Символов текста для обработки: 1 840 665
+Символов внутри FB2 binary/изображений (пропущено): 32 324
+Обработано фрагментов: 11 622/11 622
+Ошибок отдельных фрагментов: 0
+Нераспознанных слов в отчёте: 164
+Ударений подставлено из словаря RUAccent: 2
+Время обработки: 00:02:22
+Скорость: 12939,8 символов/с; 81,70 фрагментов/с
+Пик RAM процесса: 365,8 МБ
+Инференс ONNX: 00:23:23 всего, 11 622 вызов
+ONNX sessions: omograph_model(model=turbo3.1):providers=CUDAExecutionProvider,CPUExecutionProvider:cpu_threads=12; accent_model:providers=CUDAExecutionProvider,CPUExecutionProvider:cpu_threads=12; stress_usage_predictor:MISSING; yo_homograph_model:providers=CUDAExecutionProvider,CPUExecutionProvider:cpu_threads=12; accent_batch:enabled (ruaccent 1.5.8.3, self-test ok, 62 words); pipeline:workers=12; accent_cache:entries=50846:hits=170973; accent_batch:batches=8253:words=51553:rechecks=2208:fallbacks=0; dictionary_stress:requested=78:found=2
+Процесс: F:\DeepReader\DeepReader DSR\DeepReader_x64 V1.7.3Beta + DSR\DSR.exe; ОС: Microsoft Windows NT 10.0.19044.0; .NET: 8.0.32
+Процессор: 12 логических ядер
+События / исключения:
+Нет.
