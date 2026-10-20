@@ -1,7 +1,7 @@
-<Window x:Class="FB2AccentConverter.MainWindow"
+﻿<Window x:Class="FB2AccentConverter.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="DSR — ударения в FB2/TXT и доработка после конвертации"
+        Title="DSR — ударения в FB2/TXT: RUAccent, Silero и доработка"
         Width="1280" Height="920" MinWidth="1020" MinHeight="560"
         WindowStartupLocation="CenterScreen" Background="#F4EDDD"
         Foreground="#3F3025" FontFamily="Segoe UI" FontSize="13">
@@ -169,7 +169,7 @@
             <Setter Property="Background" Value="Transparent" />
             <Setter Property="BorderThickness" Value="0" />
             <Setter Property="Padding" Value="2,2,2,2" />
-            <Setter Property="ToolTip" Value="Путь определяется автоматически по указанным выше файлам" />
+            <Setter Property="ToolTip" Value="Путь определяется автоматически по указанной книге" />
         </Style>
         <Style x:Key="LetterButton" TargetType="Button">
             <Setter Property="Background" Value="Transparent" />
@@ -198,9 +198,64 @@
             <DockPanel>
                 <CheckBox DockPanel.Dock="Left" Margin="2,2,8,2" IsChecked="{Binding Included, Mode=OneWay}" Tag="{Binding Index}" Click="SampleInclude_Click" />
                 <TextBlock TextWrapping="NoWrap" TextTrimming="CharacterEllipsis">
-                    <Run Text="{Binding Before}" /><Run Text="{Binding Exact}" FontWeight="Bold" Foreground="{StaticResource Accent}" /><Run Text="{Binding After}" />
+                    <Run Text="{Binding Before, Mode=OneWay}" /><Run Text="{Binding Exact, Mode=OneWay}" FontWeight="Bold" Foreground="{StaticResource Accent}" /><Run Text="{Binding After, Mode=OneWay}" /><Run Text="{Binding Detail, Mode=OneWay}" Foreground="#9A5B22" />
                 </TextBlock>
             </DockPanel>
+        </DataTemplate>
+        <!-- Случай на странице контроля. Строкой показан сокращённо: один щелчок раскрывает
+             фрагмент целиком для чтения, и проверяемое слово подсвечивается так же, как в окне
+             ручной доводки (крупнее, жирнее, на светлом фоне). Двойной щелчок переносит случай
+             в другое окно, правая кнопка открывает меню.
+             Раскрыт всегда один случай: предыдущий сворачивается и помечается просмотренным —
+             полоской слева и спокойным фоном. Так видно, что уже прочитано, а что нет. -->
+        <DataTemplate x:Key="ControlCaseTemplate">
+            <Border x:Name="CaseCard" Background="Transparent" BorderThickness="3,0,0,0" BorderBrush="Transparent" Padding="3,0,0,0">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <!-- Метка перенесённого случая: ИИ предлагала другое ударение, чем вы оставили.
+                         У остальных случаев метки нет. -->
+                    <TextBlock Grid.Column="0" x:Name="AiMark" Text="{Binding Mark, Mode=OneWay}"
+                               Foreground="#A0532C" FontWeight="Bold" Margin="2,3,4,0"
+                               ToolTip="{Binding MarkHint, Mode=OneWay}">
+                        <TextBlock.Style>
+                            <Style TargetType="TextBlock">
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding Mark, Mode=OneWay}" Value="">
+                                        <Setter Property="Visibility" Value="Collapsed" />
+                                    </DataTrigger>
+                                    <!-- «?» — перенос на предлог, который стоит проверить глазами. -->
+                                    <DataTrigger Binding="{Binding Mark, Mode=OneWay}" Value="?">
+                                        <Setter Property="Foreground" Value="#B06A14" />
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </TextBlock.Style>
+                    </TextBlock>
+                    <StackPanel Grid.Column="1">
+                        <TextBlock x:Name="FoldedCase" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" Margin="2,3">
+                            <Run Text="{Binding Before, Mode=OneWay}" /><Run Text="{Binding Exact, Mode=OneWay}" FontWeight="Bold" Foreground="{StaticResource Accent}" /><Run Text="{Binding After, Mode=OneWay}" />
+                        </TextBlock>
+                        <TextBlock x:Name="ExpandedCase" TextWrapping="Wrap" Margin="2,3" Visibility="Collapsed">
+                            <Run Text="{Binding Before, Mode=OneWay}" /><Run Text="{Binding Exact, Mode=OneWay}" FontWeight="Black" Foreground="{StaticResource Accent}" Background="#FFF3D6" /><Run Text="{Binding After, Mode=OneWay}" />
+                        </TextBlock>
+                    </StackPanel>
+                </Grid>
+            </Border>
+            <DataTemplate.Triggers>
+                <DataTrigger Binding="{Binding IsViewed, Mode=OneWay}" Value="True">
+                    <Setter TargetName="CaseCard" Property="BorderBrush" Value="#A8B98C" />
+                    <Setter TargetName="CaseCard" Property="Background" Value="#F3F6EA" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding IsExpanded, Mode=OneWay}" Value="True">
+                    <Setter TargetName="FoldedCase" Property="Visibility" Value="Collapsed" />
+                    <Setter TargetName="ExpandedCase" Property="Visibility" Value="Visible" />
+                    <Setter TargetName="CaseCard" Property="BorderBrush" Value="{StaticResource Accent}" />
+                    <Setter TargetName="CaseCard" Property="Background" Value="#FCF3DB" />
+                </DataTrigger>
+            </DataTemplate.Triggers>
         </DataTemplate>
     </Window.Resources>
 
@@ -216,12 +271,21 @@
         </Grid.RowDefinitions>
 
         <DockPanel x:Name="HeaderPanel" Grid.Row="0" Margin="0,0,0,8" ClipToBounds="True">
-            <Button x:Name="HelpButton" DockPanel.Dock="Right" Content="Как это работает?" Padding="10,5" VerticalAlignment="Top"
-                    ToolTip="Краткая инструкция по всему процессу" />
+            <StackPanel DockPanel.Dock="Right" Margin="12,0,0,0">
+                <Button x:Name="HelpButton" Content="Как это работает?" Padding="10,5" HorizontalAlignment="Right"
+                        ToolTip="Краткая инструкция по всему процессу" />
+                <!-- Подсказок в приложении много, и знакомому пользователю они мешают: галочка
+                     убирает их все сразу. Как именно — см. статический конструктор MainWindow:
+                     событие открытия подсказки перехватывается по классам элементов, поэтому
+                     трогать ни элементы, ни шаблоны не нужно. -->
+                <CheckBox x:Name="HideToolTipsCheckBox" Content="Выключить всплывающие подсказки" Margin="0,6,0,0"
+                          HorizontalAlignment="Right"
+                          ToolTip="Убирает все всплывающие подсказки в приложении. Выбор сохраняется и действует при следующем запуске." />
+            </StackPanel>
             <StackPanel>
                 <TextBlock Text="Расстановка ударений и доработка" FontSize="20" FontWeight="SemiBold" Foreground="{StaticResource Ink}" />
                 <StackPanel Orientation="Horizontal">
-                    <TextBlock Text="FB2/TXT → ударения → проверка слов. Исходный файл не изменяется." Style="{StaticResource Note}" />
+                    <TextBlock Text="Этапный конвейер: add-stress (база) → RUAccent + Silero по словам без ударения → спорно/сомнительно/опечатка → ручная доводка. Исходный файл не изменяется." Style="{StaticResource Note}" />
                     <TextBlock x:Name="VersionText" Style="{StaticResource Note}" Margin="8,0,0,0"
                                ToolTip="Версия DSR. Обновление версии само запускает подготовку окружения." />
                 </StackPanel>
@@ -229,29 +293,42 @@
         </DockPanel>
 
         <TabControl Grid.Row="1" x:Name="ReviewTabs" ClipToBounds="True">
-            <!-- ======================= 1. ПОДГОТОВКА ======================= -->
-            <TabItem Header="1. Подготовка">
+
+            <!-- ======================= 1. ОБРАБОТКА КНИГИ ======================= -->
+            <TabItem Header="1. Обработка книги">
                 <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
                     <StackPanel>
-                        <GroupBox Header="Параметры RUAccent"
-                                  ToolTip="Модель меняет только модель омографов RUAccent: turbo — универсальная, big_poetry — для стихов, tiny — облегчённая. CUDA используется RUAccent через ONNX Runtime и доступна только для NVIDIA RTX. Галочка сохранения иллюстраций действует для FB2.">
+                        <Border Style="{StaticResource PaperCard}" Margin="0,8,0,10">
+                            <StackPanel>
+                                <TextBlock Text="Один запуск — два движка и сравнение" FontSize="17" FontWeight="SemiBold" Foreground="{StaticResource Ink}" />
+                                <TextBlock Style="{StaticResource Note}" Margin="0,4,0,0"
+                                           Text="DSR сам прогонит исходную книгу через RUAccent, затем через Silero, сравнит оба результата и оставит только расхождения. Исходник не перезаписывается: вся работа идёт в папке «DSR_имя книги» рядом с ним — отдельно прогон RUAccent, отдельно Silero со своими отчётами, затем расхождения для ИИ и ручной доводки." />
+                            </StackPanel>
+                        </Border>
+
+                        <GroupBox Header="Параметры обработки"
+                                  ToolTip="Модель меняет только модель омографов RUAccent: big_poetry — модель омографов (лучшее качество). CUDA используется RUAccent через ONNX Runtime и доступна только для NVIDIA RTX. Движки подсказок на PyTorch (silero-stress, omogre) считают на устройстве, которое выбирается во вкладке «2. Расхождения и ИИ».">
                             <StackPanel>
                                 <WrapPanel VerticalAlignment="Center">
-                                    <TextBlock Text="Модель:" Style="{StaticResource FieldLabel}" />
+                                    <TextBlock Text="Модель RUAccent:" Style="{StaticResource FieldLabel}" />
                                     <ComboBox x:Name="ModelComboBox" Width="150" />
-                                    <TextBlock Text="Устройство:" Style="{StaticResource FieldLabel}" Margin="14,0,8,0" />
+                                    <TextBlock Text="Устройство RUAccent:" Style="{StaticResource FieldLabel}" Margin="14,0,8,0" />
                                     <ComboBox x:Name="DeviceComboBox" Width="110" />
                                     <Button x:Name="GpuTestButton" Content="Проверить GPU / CUDA" Margin="10,0,0,0"
                                             ToolTip="Перепроверяет NVIDIA RTX и CUDA-провайдер ONNX Runtime. Обычно вручную нажимать не нужно: проверка уже выполняется при подготовке." />
-                                    <CheckBox x:Name="IllustrationsCheckBox" Content="Сохранить иллюстрации" IsChecked="True" IsEnabled="False" Margin="14,0,0,0" />
+                                    <CheckBox x:Name="IllustrationsCheckBox" Content="Сохранить иллюстрации" IsChecked="True" IsEnabled="False" Margin="14,0,0,0"
+                                              ToolTip="Действует для FB2: изображения попадут в результат без изменений." />
                                 </WrapPanel>
+                                <CheckBox x:Name="SileroCompareCheckBox" Margin="0,6,0,0" IsChecked="True"
+                                          Content="Второе мнение: прогонять Silero и сравнивать с RUAccent"
+                                          ToolTip="Включено (рекомендуется): после RUAccent DSR прогонит исходную книгу через Silero и соберёт расхождения — именно они уходят на ИИ и в ручную доводку. Выключите, если Silero не установлен или нужен только RUAccent: тогда на доработку пойдёт список слов, которые RUAccent оставил без ударения." />
                                 <TextBlock x:Name="GpuStatusText" Text="Проверка NVIDIA RTX…" Style="{StaticResource Note}" Margin="0,6,0,0" />
                                 <TextBlock x:Name="ModelStatusText" Style="{StaticResource Note}" Margin="0,2,0,0" />
                             </StackPanel>
                         </GroupBox>
 
-                        <GroupBox Header="Файлы"
-                                  ToolTip="Исходная книга — что обрабатываем. Результат по умолчанию сохраняется рядом с исходником как «Имя_ударения.fb2/.txt». Отчёт «…_проверка-слов.txt» и редактируемый файл нужны для доработки на вкладках 2–3; после конвертации они подставляются автоматически.">
+                        <GroupBox Header="Книга и рабочая папка"
+                                  ToolTip="Исходная книга — что обрабатываем; она никогда не изменяется. Вся работа идёт в папке «DSR_имя книги» рядом с ней. Отчёт расхождений и редактируемый файл подставляются автоматически после обработки.">
                             <Grid>
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="Auto" />
@@ -266,57 +343,72 @@
                                     <RowDefinition Height="Auto" />
                                     <RowDefinition Height="Auto" />
                                     <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
                                 </Grid.RowDefinitions>
 
                                 <TextBlock Grid.Row="0" Grid.Column="0" Text="Книга:" Style="{StaticResource FieldLabel}" Margin="0,3,8,3" />
-                                <TextBox Grid.Row="0" Grid.Column="1" x:Name="InputTextBox" IsReadOnly="True" Margin="0,2" ToolTip="Путь к исходному FB2 или TXT" />
+                                <TextBox Grid.Row="0" Grid.Column="1" x:Name="InputTextBox" IsReadOnly="True" Margin="0,2" ToolTip="Исходный FB2 или TXT. Не изменяется." />
                                 <Button Grid.Row="0" Grid.Column="2" x:Name="BrowseInputButton" Content="Выбрать…" Margin="8,2,0,2" />
 
-                                <TextBlock Grid.Row="1" Grid.Column="0" Text="Результат:" Style="{StaticResource FieldLabel}" Margin="0,3,8,3" />
-                                <TextBox Grid.Row="1" Grid.Column="1" x:Name="OutputTextBox" Margin="0,2" ToolTip="Путь к результату" />
-                                <Button Grid.Row="1" Grid.Column="2" x:Name="BrowseOutputButton" Content="Путь…" Margin="8,2,0,2" />
+                                <TextBlock Grid.Row="1" Grid.Column="0" Text="Рабочая папка:" Style="{StaticResource FieldLabel}" Margin="0,3,8,3" />
+                                <TextBox Grid.Row="1" Grid.Column="1" x:Name="WorkspaceTextBox" IsReadOnly="True" Margin="0,2"
+                                         FontSize="12" Style="{StaticResource DerivedPath}"
+                                         ToolTip="Сюда DSR складывает прогоны RUAccent и Silero, отчёт расхождений, словоформы и итог." />
+                                <Button Grid.Row="1" Grid.Column="2" x:Name="OpenWorkspaceButton" Content="Показать" Margin="8,2,0,2" IsEnabled="False"
+                                        ToolTip="Открыть папку DSR_имя книги в проводнике." />
 
-                                <TextBlock Grid.Row="2" Grid.Column="0" Text="Отчёт слов:" Style="{StaticResource FieldLabel}" Margin="0,3,8,3" />
-                                <TextBox Grid.Row="2" Grid.Column="1" x:Name="ReviewFileTextBox" IsReadOnly="True" Margin="0,2" ToolTip="Отчёт нераспознанных слов «…_проверка-слов.txt»" />
-                                <Button Grid.Row="2" Grid.Column="2" x:Name="ChooseReviewButton" Content="Отчёт…" Margin="8,2,0,2" />
+                                <TextBlock Grid.Row="2" Grid.Column="0" Text="Результат RUAccent:" Style="{StaticResource FieldLabel}" Margin="0,3,8,3" />
+                                <TextBox Grid.Row="2" Grid.Column="1" x:Name="OutputTextBox" IsReadOnly="True" Margin="0,2"
+                                         FontSize="12" Style="{StaticResource DerivedPath}"
+                                         ToolTip="Книга с ударениями RUAccent внутри рабочей папки: это основа для правок." />
 
-                                <TextBlock Grid.Row="3" Grid.Column="0" Text="Правки в:" Style="{StaticResource FieldLabel}" Margin="0,3,8,3" />
-                                <TextBox Grid.Row="3" Grid.Column="1" x:Name="Fb2FileTextBox" IsReadOnly="True" Margin="0,2" ToolTip="Редактируемый файл — результат конвертации (FB2 или TXT)" />
-                                <Button Grid.Row="3" Grid.Column="2" x:Name="ChooseFb2Button" Content="Файл…" Margin="8,2,0,2" />
+                                <TextBlock Grid.Row="3" Grid.Column="0" Text="Отчёт расхождений:" Style="{StaticResource FieldLabel}" Margin="0,3,8,3" />
+                                <TextBox Grid.Row="3" Grid.Column="1" x:Name="ReviewFileTextBox" IsReadOnly="True" Margin="0,2" ToolTip="Отчёт расхождений RUAccent и Silero — слова для ИИ и ручной доводки" />
+                                <Button Grid.Row="3" Grid.Column="2" x:Name="ChooseReviewButton" Content="Отчёт…" Margin="8,2,0,2" />
 
-                                <!-- Производные пути: приложение само решает, куда положит файлы правок и статистики.
-                                     Пустые строки скрыты, чтобы группа не вырастала без нужды. -->
-                                <TextBlock Grid.Row="4" Grid.Column="0" x:Name="CorrectedPathLabel" Text="Отредактир.:" Style="{StaticResource FieldLabel}" Margin="0,4,8,2" Visibility="Collapsed" />
-                                <TextBox Grid.Row="4" Grid.Column="1" x:Name="CorrectedFileTextBox" IsReadOnly="True" Margin="0,3,0,1"
+                                <TextBlock Grid.Row="4" Grid.Column="0" Text="Правки в:" Style="{StaticResource FieldLabel}" Margin="0,3,8,3" />
+                                <TextBox Grid.Row="4" Grid.Column="1" x:Name="Fb2FileTextBox" IsReadOnly="True" Margin="0,2"
+                                         FontSize="12" Style="{StaticResource DerivedPath}"
+                                         ToolTip="Книга, к которой применяются правки: результат RUAccent (FB2 или TXT)" />
+                                <Button Grid.Row="4" Grid.Column="2" x:Name="ChooseFb2Button" Content="Файл…" Margin="8,2,0,2" />
+
+                                <!-- Производные пути: приложение само решает, куда положит итог, словоформы и статистику. -->
+                                <TextBlock Grid.Row="5" Grid.Column="0" x:Name="CorrectedPathLabel" Text="Отредактир.:" Style="{StaticResource FieldLabel}" Margin="0,4,8,2" Visibility="Collapsed" />
+                                <TextBox Grid.Row="5" Grid.Column="1" x:Name="CorrectedFileTextBox" IsReadOnly="True" Margin="0,3,0,1"
                                          FontSize="12" Style="{StaticResource DerivedPath}" Visibility="Collapsed"
-                                         ToolTip="Файл, который создаст «Применить всё и сохранить»: к редактируемому файлу добавляется _corrected" />
+                                         ToolTip="Итог, который создаст «Применить всё и сохранить»: «имя_итог» в рабочей папке" />
 
-                                <TextBlock Grid.Row="5" Grid.Column="0" x:Name="FormsPathLabel" Text="Правки (формы):" Style="{StaticResource FieldLabel}" Margin="0,4,8,2" Visibility="Collapsed" />
-                                <TextBox Grid.Row="5" Grid.Column="1" x:Name="FormsFileTextBox" IsReadOnly="True" Margin="0,3,0,1"
+                                <TextBlock Grid.Row="6" Grid.Column="0" x:Name="FormsPathLabel" Text="Правки (формы):" Style="{StaticResource FieldLabel}" Margin="0,4,8,2" Visibility="Collapsed" />
+                                <TextBox Grid.Row="6" Grid.Column="1" x:Name="FormsFileTextBox" IsReadOnly="True" Margin="0,3,0,1"
                                          FontSize="12" Style="{StaticResource DerivedPath}" Visibility="Collapsed"
-                                         ToolTip="Файл с сохранёнными исправлениями и словоформами: рядом с отчётом слов" />
+                                         ToolTip="Файл с сохранёнными исправлениями и словоформами: рядом с отчётом расхождений" />
 
-                                <TextBlock Grid.Row="6" Grid.Column="0" x:Name="StatsPathLabel" Text="Статистика:" Style="{StaticResource FieldLabel}" Margin="0,4,8,2" Visibility="Collapsed" />
-                                <TextBox Grid.Row="6" Grid.Column="1" x:Name="StatsFileTextBox" IsReadOnly="True" Margin="0,3,0,1"
+                                <TextBlock Grid.Row="7" Grid.Column="0" x:Name="StatsPathLabel" Text="Статистика:" Style="{StaticResource FieldLabel}" Margin="0,4,8,2" Visibility="Collapsed" />
+                                <TextBox Grid.Row="7" Grid.Column="1" x:Name="StatsFileTextBox" IsReadOnly="True" Margin="0,3,0,1"
                                          FontSize="12" Style="{StaticResource DerivedPath}" Visibility="Collapsed"
-                                         ToolTip="Отчёт со статистикой конвертации: рядом с результатом" />
+                                         ToolTip="Отчёты со статистикой: по прогону RUAccent, по прогону Silero и по сравнению" />
                             </Grid>
                         </GroupBox>
 
                         <GroupBox Header="Запуск и контроль">
                             <StackPanel>
                                 <WrapPanel>
-                                    <Button x:Name="PrepareButton" Content="Подготовка к работе"
-                                            ToolTip="Настраивает Python, загружает и проверяет выбранную модель RUAccent. Обычно нажимать не нужно: DSR делает это сам при первом запуске, в новом месте, на новом компьютере и после смены модели." />
-                                    <Button x:Name="ConvertButton" Content="Начать конвертацию" Background="{StaticResource Accent}" Foreground="White" FontWeight="SemiBold" />
+                                    <Button x:Name="ConvertButton" Content="Обработать книгу (RUAccent + Silero)" Background="{StaticResource Accent}" Foreground="White" FontWeight="SemiBold"
+                                            ToolTip="Прогоняет исходник через RUAccent, затем через Silero и сравнивает результаты. После этого открывается вкладка «2. Расхождения и ИИ»." />
+                                     <Button x:Name="ConvertStressAnchorButton" Content="Обработать через add-stress-to-epub" Background="#2E7D32" Foreground="White" FontWeight="SemiBold"
+                                             ToolTip="Использует spaCy + Wiktionary (add-stress-to-epub) для расстановки ударений. Работает через DSR FB2-парсер." />
+                                    <Button x:Name="ConvertStagedButton" Content="Обработать по этапам (add-stress → RUAccent + Silero)" Background="#1565C0" Foreground="White" FontWeight="SemiBold"
+                                            ToolTip="Этапный конвейер: add-stress-to-epub создаёт базу, затем RUAccent и Silero заполняют только слова без ударения в базе. Результаты сравниваются и делятся на «спорно», «сомнительно» и «неизвестно/опечатка». Итог собирается на вкладке ручной доводки из базы." />
                                     <Button x:Name="PauseConversionButton" Content="Пауза" IsEnabled="False" />
                                     <Button x:Name="StopConversionButton" Content="Стоп" IsEnabled="False" />
-                                    <Button x:Name="ReviewWordsButton" Content="Перейти к доработке слов…" IsEnabled="False"
-                                            ToolTip="Открывает вкладку ИИ-доработки: подставляет результат последнего запуска и список нераспознанных слов." />
+                                    <Button x:Name="PrepareButton" Content="Подготовка к работе"
+                                            ToolTip="Проверяет и при необходимости скачивает Python, пакеты и модель. Обычно нажимать не нужно: DSR делает это сам при первом запуске, в новом месте, на новом компьютере и после смены модели." />
+                                    <Button x:Name="ReviewWordsButton" Content="Перейти к расхождениям и ИИ…" IsEnabled="False"
+                                            ToolTip="Открывает вкладку «2. Расхождения и ИИ»: подставляет результат последнего запуска и список расхождений." />
                                     <Button x:Name="LoadFilesButton" Content="Открыть отчёт и файл"
-                                            ToolTip="Загружает указанные отчёт слов и редактируемый файл в список слов." />
+                                            ToolTip="Загружает указанные отчёт расхождений и редактируемый файл в список слов." />
                                     <Button x:Name="ContinueWorkButton" Content="Продолжить работу" IsEnabled="False"
-                                            ToolTip="Открывает документ, который вы проверяли в прошлый раз: отчёт слов и уже отредактированный файл. Правки из отчёта применяются поверх них, поэтому можно вернуться и дополнить старые решения." />
+                                            ToolTip="Открывает документ, который вы проверяли в прошлый раз: отчёт расхождений и уже отредактированный файл." />
                                 </WrapPanel>
                                 <ProgressBar x:Name="ConversionProgressBar" Height="6" Margin="0,8,0,0" Minimum="0" Maximum="100" Visibility="Collapsed" />
                                 <TextBlock x:Name="StatusText" TextWrapping="Wrap" Margin="0,6,0,0" />
@@ -335,8 +427,14 @@
                                     <TextBlock Grid.Row="3" Text="Сеть" /><ProgressBar x:Name="NetworkUsageBar" Grid.Row="3" Grid.Column="1" Maximum="100" Height="7" Margin="0,4,10,4" /><TextBlock x:Name="NetworkLabel" Grid.Row="3" Grid.Column="2" Text="Сеть: измерение…" Style="{StaticResource Note}" />
                                 </Grid>
                                 <DockPanel Margin="0,6,0,0">
-                                    <Button x:Name="ClearCacheButton" DockPanel.Dock="Right" Content="Очистить модели и кэш"
-                                            ToolTip="Удаляет папку ресурсов рядом с приложением; приложение и ваши книги не затрагиваются." />
+                                    <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                                        <Button x:Name="CheckResourcesButton" Content="Проверить ресурсы"
+                                                ToolTip="Глубокая проверка: встроенные словари, движок add-stress, Python, пакеты RUAccent/ONNX Runtime и файлы модели. Ничего не скачивает." />
+                                        <Button x:Name="ReloadResourcesButton" Content="Загрузить ресурсы заново"
+                                                ToolTip="Удаляет папку ресурсов и заново скачивает Python, пакеты и модели. DSR.exe и ваши книги не затрагиваются." />
+                                        <Button x:Name="ClearCacheButton" Content="Очистить всё"
+                                                ToolTip="Удаляет всю папку ресурсов рядом с приложением: Python, модели, кэш, словари и служебные настройки. DSR.exe и ваши книги не затрагиваются." />
+                                    </StackPanel>
                                     <TextBlock x:Name="ResourceSizeStatusText" Style="{StaticResource Note}" VerticalAlignment="Center" Margin="0,0,10,0" />
                                 </DockPanel>
                             </StackPanel>
@@ -345,8 +443,8 @@
                 </ScrollViewer>
             </TabItem>
 
-            <!-- ======================= 2. ИИ-ДОРАБОТКА ======================= -->
-            <TabItem Header="2. ИИ-доработка">
+            <!-- ======================= 2. РАСХОЖДЕНИЯ И ИИ ======================= -->
+            <TabItem Header="2. Расхождения и ИИ">
                 <Grid Margin="0,8,0,0">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto" />
@@ -355,14 +453,21 @@
 
                     <Border Grid.Row="0" Style="{StaticResource PaperCard}" Margin="0,0,0,10">
                         <StackPanel>
+                            <TextBlock Style="{StaticResource Note}" Margin="0,0,0,6"
+                                       Text="Здесь только слова, по которым RUAccent и Silero поставили ударение на разные гласные. Необязательный ИИ-проход разбирает их по контексту на вкладке «3. Контроль ИИ результатов». В ручную доводку (вкладка 4) фрагменты не попадают сами: их переносят туда перетаскиванием на заголовок вкладки; перенесённое исчезает из этого списка и из контроля ИИ." />
                             <WrapPanel VerticalAlignment="Center">
                                 <TextBlock Text="Движок подсказок:" VerticalAlignment="Center" Margin="0,0,8,0" />
                                 <ComboBox x:Name="LlmProviderComboBox" Width="250"
-                                          ToolTip="Своя модель на диске — файлы в папке ресурсы\модели\llm. Ollama — ваш локальный сервер. Внешний API — сервис с OpenAI-совместимым интерфейсом (OpenAI, OpenRouter, LM Studio, llama.cpp, vLLM)." />
+                                          ToolTip="omogre — локальная контекстная модель омографов (разбирает спорные случаи по предложению). Своя модель на диске — файлы в папке ресурсы\модели\llm. Ollama — ваш локальный сервер. Внешний API — сервис с OpenAI-совместимым интерфейсом (OpenAI, OpenRouter, LM Studio, llama.cpp, vLLM)." />
                                 <CheckBox x:Name="LlmReuseCheckBox" Margin="14,0,0,0" VerticalAlignment="Center"
                                           Content="Не переспрашивать уже отвеченные слова"
                                           ToolTip="Включено: если подсказка для слова уже есть (у любого движка), слово не отправляется. Снимите галочку, чтобы новый движок проверил заново все слова, по которым отвечали другие." />
                             </WrapPanel>
+
+                            <DockPanel x:Name="LlmOmogrePanel" Margin="0,6,0,0">
+                                <TextBlock TextWrapping="Wrap" Style="{StaticResource Note}"
+                                           Text="Контекстная модель омографов: выбирает ударение по предложению, а не по слову (за́мок/замо́к, сто́ит/стои́т, му́ку/мука́). Работает полностью локально. При первом запуске ставится библиотека и PyTorch (CPU), модель около 120 МБ скачивается один раз в ресурсы\модели\omogre." />
+                            </DockPanel>
 
                             <DockPanel x:Name="LlmLocalPanel" Margin="0,6,0,0">
                                 <Button x:Name="LlmLocalRefreshButton" DockPanel.Dock="Right" Content="Обновить" Padding="10,5" Margin="8,0,0,0" />
@@ -396,6 +501,17 @@
                                 </DockPanel>
                             </StackPanel>
 
+                            <WrapPanel Margin="0,10,0,0" VerticalAlignment="Center">
+                                <TextBlock Text="Видеокарта для движков подсказок (silero-stress, omogre):" Style="{StaticResource FieldLabel}" Margin="0,0,8,0" />
+                                <ComboBox x:Name="LlmDeviceComboBox" Width="165"
+                                          ToolTip="Где считать локальные движки подсказок. «Процессор» работает всегда. «Видеокарта» уводит на NVIDIA счёт сети — это самая долгая часть разбора расхождений, — но нужна сборка PyTorch с CUDA (около трёх гигабайт), её ставит кнопка правее. Выбор сохраняется до следующего запуска." />
+                                <Button x:Name="LlmCudaProbeButton" Content="Проверить" Padding="10,5" Margin="8,0,0,0"
+                                        ToolTip="Показывает, какая сборка PyTorch стоит и видит ли она видеокарту. Ничего не меняет и ничего не скачивает." />
+                                <Button x:Name="LlmCudaInstallButton" Content="Поставить сборку с CUDA" Padding="10,5" Margin="8,0,0,0"
+                                        ToolTip="Скачивает сборку PyTorch с поддержкой CUDA (около трёх гигабайт) и заменяет ею сборку для процессора; если что-то не выйдет, вернёт прежнюю. После установки кнопка меняется на «Вернуть сборку для процессора»." />
+                            </WrapPanel>
+                            <TextBlock x:Name="LlmDeviceStatusTextBlock" Style="{StaticResource Note}" TextWrapping="Wrap" Margin="0,4,0,0" />
+
                             <DockPanel Margin="0,8,0,0">
                                 <Button x:Name="LlmBenchmarkButton" DockPanel.Dock="Left" Content="Проверить движок"
                                         ToolTip="Прогоняет 31 контрольное слово с заранее известным ударением и показывает, сколько движок угадал и за какое время." />
@@ -406,32 +522,38 @@
                     </Border>
 
                     <Border Grid.Row="1" Style="{StaticResource PaperCard}"
-                            ToolTip="Проход ИИ можно пропустить. Найденное — только подсказки: каждая принимается вручную на вкладке «3. Ручная доводка» кнопкой «Да ✓».">
+                            ToolTip="Проход ИИ можно пропустить. Найденное — только подсказки: omogre дополнительно раскладывает омографы по случаям на вкладке «3. Контроль ИИ результатов», окончательно каждая правка принимается на вкладке «4. Ручная доводка».">
                         <Grid>
                             <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
                                 <RowDefinition Height="Auto" />
                                 <RowDefinition Height="*" />
                                 <RowDefinition Height="Auto" />
                             </Grid.RowDefinitions>
 
                             <DockPanel Grid.Row="0" Margin="0,0,0,6">
-                                <Button x:Name="LlmCheckButton" DockPanel.Dock="Right" Content="Подсказки ИИ по контексту" Padding="14,8"
-                                        Background="{StaticResource Accent}" Foreground="White" FontWeight="SemiBold"
-                                        ToolTip="Выбранный движок предложит ударение для слов, которых нет в словаре. Найденное показывается по каждому слову отдельно и применяется только вручную." />
+                                <Button x:Name="ManualReviewStepButton" DockPanel.Dock="Right" Content="Пропустить ИИ → ручной выбор" Padding="12,7" Margin="0,0,8,0"
+                                        ToolTip="Переходит к ручному выбору по всем расхождениям. ИИ-этап необязателен." />
                                 <Button x:Name="LlmRecheckButton" DockPanel.Dock="Right" Content="Перепроверить с помощью ИИ" Padding="14,8" Margin="0,0,8,0"
-                                        ToolTip="Спрашивает движок заново по всем словам отчёта, включая уже проверенные, и забывает прежние ответы. Нужно, когда модель обновилась или сменилась: обычный проход берёт прежние ответы из кэша и ничего не меняет." />
+                                        ToolTip="Спрашивает движок заново по всем словам из отчёта расхождений." />
+                                <Button x:Name="LlmCheckButton" DockPanel.Dock="Right" Content="Подсказки ИИ по расхождениям" Padding="14,8"
+                                        Background="{StaticResource Accent}" Foreground="White" FontWeight="SemiBold"
+                                        ToolTip="Запустить необязательный этап ИИ по словам из отчёта расхождений. Ответы останутся вариантами, текст автоматически не меняется." />
                                 <CheckBox x:Name="ShowCheckedCheckBox" DockPanel.Dock="Right" VerticalAlignment="Center" Margin="0,0,14,0"
                                           Content="Показывать проверенные"
                                           ToolTip="Слова, к которым правка уже применена, отмечены галочкой и по умолчанию скрыты. Снимите галочку, чтобы вернуться к любому из них и изменить решение — сам документ и список слов при этом не теряются." />
-                                <TextBlock Text="Нераспознанные слова" FontWeight="SemiBold" VerticalAlignment="Center" />
-                                <TextBlock Text=" (двойной щёлчок открывает слово на вкладке 3)" Style="{StaticResource Note}" VerticalAlignment="Center" />
+                                <TextBlock Text="Расхождения RUAccent / Silero" FontWeight="SemiBold" VerticalAlignment="Center" />
                             </DockPanel>
 
-                            <ListBox Grid.Row="1" x:Name="UnrecognizedWordsListBox" DisplayMemberPath="Display"
-                                     ToolTip="Список слов из отчёта, для которых нет ни словарного, ни вашего варианта." />
+                            <TextBlock Grid.Row="1" x:Name="DisagreementSummaryTextBlock" Style="{StaticResource Note}" Margin="0,0,0,6"
+                                       Text="Отчёт расхождений появится после обработки книги на вкладке 1."
+                                       ToolTip="Сколько расхождений найдено, по скольким ИИ дал подсказку и по скольким нет." />
 
-                            <WrapPanel Grid.Row="2" Margin="0,8,0,0">
-                                <Button x:Name="ApplyAllButton" Content="Применить все правки → *_corrected" IsEnabled="False"
+                            <ListBox Grid.Row="2" x:Name="UnrecognizedWordsListBox" DisplayMemberPath="Display"
+                                     ToolTip="Слова, для которых RUAccent и Silero поставили ударение на разные гласные. Двойной щелчок открывает слово на вкладке ручной доводки." />
+
+                            <WrapPanel Grid.Row="3" Margin="0,8,0,0">
+                                <Button x:Name="ApplyAllButton" Content="Применить все правки → итог" IsEnabled="False"
                                         Background="{StaticResource Accent}" Foreground="White" FontWeight="SemiBold"
                                         ToolTip="Применяет все внесённые правки по группам и сохранённые словоформы за один раз; исходный файл не изменяется." />
                                 <Button x:Name="OpenCorrectionsButton" Content="Открыть файл форм слов" IsEnabled="False" />
@@ -441,8 +563,162 @@
                 </Grid>
             </TabItem>
 
-            <!-- ======================= 3. РУЧНАЯ ДОВОДКА ======================= -->
-            <TabItem Header="3. Ручная доводка">
+            <!-- ============ 3. КОНТРОЛЬ ИИ РЕЗУЛЬТАТОВ ============ -->
+            <TabItem Header="3. Контроль ИИ результатов">
+                <Border Style="{StaticResource PaperCard}" Margin="0,8,0,0">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+
+                        <!-- Компактная шапка: слово, листание и размер шрифта в одной строке.
+                             Подробная инструкция убрана в подсказку — она больше не отнимает
+                             высоту у окон с примерами. -->
+                        <DockPanel Grid.Row="0" Margin="0,0,0,4">
+                            <Button x:Name="ControlPreviousWordButton" DockPanel.Dock="Left" Content="◀ Слово"
+                                    Padding="10,6" VerticalAlignment="Center"
+                                    ToolTip="Предыдущее слово с разными вариантами ударения." />
+                            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                                <Button x:Name="ControlFontSmallerButton" Content="A−" Width="34" Padding="0"
+                                        Margin="0,0,4,0" ToolTip="Мельче: уменьшить шрифт примеров в окнах." />
+                                <Button x:Name="ControlFontLargerButton" Content="A+" Width="34" Padding="0"
+                                        Margin="0,0,10,0" ToolTip="Крупнее: увеличить шрифт примеров в окнах." />
+                                <Button x:Name="ControlNextWordButton" Content="Слово ▶" Padding="10,6"
+                                        ToolTip="Следующее слово с разными вариантами ударения." />
+                            </StackPanel>
+                            <TextBlock x:Name="ControlWordTextBlock" FontSize="28" FontWeight="Bold"
+                                       TextAlignment="Center" VerticalAlignment="Center"
+                                       TextTrimming="CharacterEllipsis"
+                                       Foreground="{StaticResource Accent}">
+                                <TextBlock.ToolTip>
+                                    <TextBlock TextWrapping="Wrap" MaxWidth="520"
+                                               Text="Сверху — слово. Слева — вариант 1 (общая форма группы), справа — вариант 2 (случаи с другим ударением), третье окно — энклиномены: ударение уходит на предлог («на́ пол», «на́ ноги»), слово остаётся без знака и только в этом месте. Если разбор не знает слово, случай всё равно можно перенести в третье окно вручную. Один щелчок раскрывает фрагмент целиком, двойной переносит случай в другое окно, случай можно перетащить мышкой, правая кнопка открывает меню. Раскрыт всегда один случай: прежний сворачивается и помечается прочитанным. Перенос можно отменить, а все правки видны в журнале и сохраняются в txt." />
+                                </TextBlock.ToolTip>
+                            </TextBlock>
+                        </DockPanel>
+
+                        <DockPanel Grid.Row="1" Margin="0,0,0,6">
+                            <TextBlock x:Name="ControlPositionTextBlock" DockPanel.Dock="Left" VerticalAlignment="Center"
+                                       Style="{StaticResource Note}" Margin="0,0,12,0" />
+                            <TextBlock x:Name="ControlSummaryTextBlock" Style="{StaticResource Note}"
+                                       TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"
+                                       VerticalAlignment="Center"
+                                       Text="После обработки ИИ (omogre) здесь появится разбор по каждому случаю: слово и два варианта ударения, случаи разложены по окнам. Пока прогона не было, страница пуста — запустите «Подсказки ИИ по расхождениям» на вкладке 2.">
+                                <TextBlock.ToolTip>
+                                    <ToolTip>
+                                        <TextBlock TextWrapping="Wrap" MaxWidth="620"
+                                                   Text="{Binding PlacementTarget.Text, RelativeSource={RelativeSource AncestorType=ToolTip}}" />
+                                    </ToolTip>
+                                </TextBlock.ToolTip>
+                            </TextBlock>
+                        </DockPanel>
+
+                        <Grid Grid.Row="2">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="1*" MinWidth="200" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="1*" MinWidth="200" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="1*" MinWidth="200" />
+                            </Grid.ColumnDefinitions>
+
+                            <DockPanel Grid.Column="0" Margin="0,0,6,0"
+                                       ToolTip="Случаи, у которых ударение совпадает с вариантом 1 (общая форма группы). Один щелчок раскрывает фрагмент целиком, двойной — переносит случай в правое окно; случай можно перетащить мышкой.">
+                                <TextBlock DockPanel.Dock="Top" x:Name="ControlLeftHeaderTextBlock" FontWeight="SemiBold"
+                                           Margin="0,0,0,4" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
+                                <ListBox x:Name="ControlLeftCasesListBox" SelectionMode="Single" AllowDrop="True"
+                                         ItemTemplate="{StaticResource ControlCaseTemplate}"
+                                         ScrollViewer.CanContentScroll="False"
+                                         ScrollViewer.VerticalScrollBarVisibility="Auto"
+                                         ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                         VirtualizingPanel.IsVirtualizing="False">
+                                    <!-- Раскрытый фрагмент переносится по строкам: содержимому нужна
+                                         вся ширина окна, иначе переносить текст некуда. -->
+                                    <ListBox.ItemContainerStyle>
+                                        <Style TargetType="ListBoxItem" BasedOn="{StaticResource {x:Type ListBoxItem}}">
+                                            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                        </Style>
+                                    </ListBox.ItemContainerStyle>
+                                </ListBox>
+                            </DockPanel>
+
+                            <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="4,0,4,0">
+                                <Button x:Name="ControlMoveRightButton" Content="→" FontSize="20" Padding="10,6" Margin="0,0,0,8"
+                                        ToolTip="Перенести выбранный случай в правое окно: у него будет вариант 2." />
+                                <Button x:Name="ControlMoveLeftButton" Content="←" FontSize="20" Padding="10,6"
+                                        ToolTip="Перенести выбранный случай в левое окно: у него будет вариант 1." />
+                            </StackPanel>
+
+                            <DockPanel Grid.Column="2" Margin="6,0,6,0"
+                                       ToolTip="Случаи с отдельным ударением (вариант 2). Один щелчок раскрывает фрагмент целиком, двойной — переносит случай в левое окно; случай можно перетащить мышкой.">
+                                <TextBlock DockPanel.Dock="Top" x:Name="ControlRightHeaderTextBlock" FontWeight="SemiBold"
+                                           Margin="0,0,0,4" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
+                                <ListBox x:Name="ControlRightCasesListBox" SelectionMode="Single" AllowDrop="True"
+                                         ItemTemplate="{StaticResource ControlCaseTemplate}"
+                                         ScrollViewer.CanContentScroll="False"
+                                         ScrollViewer.VerticalScrollBarVisibility="Auto"
+                                         ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                         VirtualizingPanel.IsVirtualizing="False">
+                                    <ListBox.ItemContainerStyle>
+                                        <Style TargetType="ListBoxItem" BasedOn="{StaticResource {x:Type ListBoxItem}}">
+                                            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                        </Style>
+                                    </ListBox.ItemContainerStyle>
+                                </ListBox>
+                            </DockPanel>
+
+                            <StackPanel Grid.Column="3" VerticalAlignment="Center" Margin="4,0,4,0">
+                                <Button x:Name="ControlMoveToPrepositionButton" Content="⇢" FontSize="20" Padding="10,6" Margin="0,0,0,8"
+                                        ToolTip="Ударение на предлог: «по́ полу», «на́ ноги». Слово остаётся безударным, и только в этом месте. Переносится случай, выделенный в любом из окон. Если слово не входит в список энклиноменов, перенос всё равно доступен вручную — проверьте предлог глазами." />
+                                <Button x:Name="ControlMoveFromPrepositionButton" Content="⇠" FontSize="20" Padding="10,6"
+                                        ToolTip="Вернуть ударение в слово: случай уходит из третьего окна в вариант 1." />
+                            </StackPanel>
+
+                            <DockPanel Grid.Column="4" Margin="6,0,0,0"
+                                       ToolTip="Энклиномены: предлог перетягивает ударение на себя, слово произносится без ударения («на́ пол», «по́ полу», «и́з дому», «на́ ноги»). Знак ставится на предлог и только для этого вхождения. Рядом с вопросом — случаи, перенесённые вручную или с ещё одним словом после проверяемого: их надо проверить глазами.">
+                                <TextBlock DockPanel.Dock="Top" x:Name="ControlEnclinomenHeaderTextBlock" FontWeight="SemiBold"
+                                           Margin="0,0,0,4" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
+                                <ListBox x:Name="ControlEnclinomenCasesListBox" SelectionMode="Single" AllowDrop="True"
+                                         ItemTemplate="{StaticResource ControlCaseTemplate}"
+                                         ScrollViewer.CanContentScroll="False"
+                                         ScrollViewer.VerticalScrollBarVisibility="Auto"
+                                         ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                         VirtualizingPanel.IsVirtualizing="False">
+                                    <ListBox.ItemContainerStyle>
+                                        <Style TargetType="ListBoxItem" BasedOn="{StaticResource {x:Type ListBoxItem}}">
+                                            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                        </Style>
+                                    </ListBox.ItemContainerStyle>
+                                </ListBox>
+                            </DockPanel>
+                        </Grid>
+
+                        <!-- Действия — одной строкой: на узком окне WrapPanel переносит кнопки,
+                             не отнимая у примеров постоянные два ряда высоты. -->
+                        <WrapPanel Grid.Row="3" Margin="0,6,0,0">
+                            <Button x:Name="ControlUndoButton" Content="Отменить перенос" Padding="9,5" Margin="0,0,6,6"
+                                    ToolTip="Возвращает последний перенос туда, где случай был до него. Отменять можно по шагам назад — каждый перенос записан в журнал правок." />
+                            <Button x:Name="ControlJournalButton" Content="Журнал правок" Padding="9,5" Margin="0,0,6,6"
+                                    ToolTip="Все переносы случаев и отмены: время, слово, что заменено на что. Двойной щелчок по строке открывает этот случай здесь же, список сохраняется в txt-документ." />
+                            <Button x:Name="ControlResetViewedButton" Content="Сбросить прочитанное" Padding="9,5" Margin="0,0,6,6"
+                                    ToolTip="Убирает пометки «прочитано» у всех случаев: слово можно пройти заново. Статистика точности начнёт считаться заново, переносы случаев останутся." />
+                            <Button x:Name="ControlAccuracyButton" Content="Отчёт о точности" Padding="9,5" Margin="0,0,6,6"
+                                    ToolTip="Считает, в каких случаях ИИ была права, а в каких вы перенесли случай, сравнивает с RUAccent и Silero и сохраняет отчёт рядом с отчётом расхождений. Каждый проверенный случай пишется в журнал примеров для обучения моделей." />
+                            <Button x:Name="ControlSaveButton" Content="Сохранить контроль" Padding="9,5" Margin="0,0,6,6"
+                                    ToolTip="Записывает общие формы и отдельные ударения случаев в отчёт, чтобы к работе можно было вернуться. Рядом с отчётом сохраняются журнал правок и отчёт о точности ИИ." />
+                            <Button x:Name="ControlToManualButton" Content="Перейти к ручной доводке →" Padding="9,5" Margin="0,0,0,6"
+                                    ToolTip="Открывает вкладку 4, переносит туда слово, открытое сейчас в контроле ИИ, и раскрывает выбранный случай. Из контроля ИИ слово исчезает; вернуть его можно перетаскиванием обратно на заголовок вкладки 3." />
+                        </WrapPanel>
+
+                    </Grid>
+                </Border>
+            </TabItem>
+
+            <!-- ======================= 4. РУЧНАЯ ДОВОДКА ======================= -->
+            <TabItem Header="4. Ручная доводка">
                 <Border Style="{StaticResource PaperCard}" Margin="0,8,0,0">
                     <Grid>
                         <Grid.RowDefinitions>
@@ -463,7 +739,10 @@
                             <CheckBox x:Name="ShowCheckedManualCheckBox" DockPanel.Dock="Right" VerticalAlignment="Center" Margin="8,0,0,0"
                                       Content="Показывать проверенные"
                                       ToolTip="Слова с уже применённой правкой отмечены галочкой и по умолчанию скрыты. Снимите галочку, чтобы вернуться к любому из них." />
-                            <TextBlock Text="Поиск:" VerticalAlignment="Center" Margin="0,0,6,0" />
+                            <TextBlock Text="Показывать:" VerticalAlignment="Center" Margin="0,0,6,0" />
+                            <ComboBox x:Name="ManualFilterComboBox" Width="220" Margin="0,0,0,6"
+                                      ToolTip="Вкладка наполняется перетаскиванием фрагментов на её заголовок из списков вкладок 2–3: ничего лишнего здесь не появляется. Фильтр: всё перенесённое, только то, где ИИ не разобрала, или только слова без ударения у обеих моделей." />
+                            <TextBlock Text="Поиск:" VerticalAlignment="Center" Margin="10,0,6,0" />
                             <TextBox x:Name="SearchTextBox" MinWidth="120" Margin="0,0,0,6" ToolTip="Фильтр по слову или контексту" />
                         </DockPanel>
 
@@ -475,7 +754,7 @@
                             </Grid.ColumnDefinitions>
 
                             <DockPanel Grid.Column="0" Margin="0,0,6,0"
-                                       ToolTip="Выберите слово в верхнем списке, затем конкретный контекст ниже. Снимите флажок у контекста, чтобы исключить его из общей правки.">
+                                       ToolTip="Выберите слово в верхнем списке, затем конкретный контекст ниже. Снимите флажок у контекста — и ему можно задать отдельное ударение; остальные образцы под галочкой берут общую форму.">
                                 <Grid>
                                     <Grid.RowDefinitions><RowDefinition Height="*" /><RowDefinition Height="8" /><RowDefinition Height="*" /></Grid.RowDefinitions>
                                     <DockPanel Grid.Row="0">
@@ -511,27 +790,40 @@
                                             <RowDefinition Height="Auto" />
                                             <RowDefinition Height="Auto" />
                                             <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="Auto" />
                                         </Grid.RowDefinitions>
 
                                         <!-- Рабочие поля остаются скрытыми: написание правится прямо в тексте ниже. -->
                                         <TextBox x:Name="CorrectionTextBox" Visibility="Collapsed" IsTabStop="False" Focusable="False" />
                                         <TextBlock x:Name="ContextTextBlock" Visibility="Collapsed" />
 
-                                        <Border x:Name="LlmHintPanel" Grid.Row="0" Margin="0,0,0,8" Padding="10,8"
+                                        <Border x:Name="AiVerdictPanel" Grid.Row="0" Margin="0,0,0,8" Padding="10,8"
+                                                CornerRadius="6" Background="#EEF3E3" BorderBrush="#8FA36B" BorderThickness="1" Visibility="Collapsed">
+                                            <TextBlock x:Name="AiVerdictTextBlock" TextWrapping="Wrap" />
+                                        </Border>
+
+                                        <Border x:Name="LlmHintPanel" Grid.Row="1" Margin="0,0,0,8" Padding="10,8"
                                                 CornerRadius="6" Background="#FFF6E0" BorderBrush="{StaticResource Accent}"
                                                 BorderThickness="1" Visibility="Collapsed">
                                             <StackPanel>
-                                                <TextBlock Text="ПОДСКАЗКА ИИ ПО КОНТЕКСТУ" Style="{StaticResource SectionHeader}" Margin="0,0,0,2" />
+                                                <TextBlock Text="ВАРИАНТЫ МОДЕЛЕЙ — выберите, затем подтвердите «Да ✓»" Style="{StaticResource SectionHeader}" Margin="0,0,0,2" />
                                                 <TextBlock x:Name="LlmHintTextBlock" TextWrapping="Wrap" FontSize="14" />
+                                                <WrapPanel x:Name="ModelChoicesPanel" Margin="0,6,0,0" />
                                             </StackPanel>
                                         </Border>
 
-                                        <StackPanel Grid.Row="1">
+                                        <StackPanel Grid.Row="2">
                                             <Grid>
                                                 <TextBlock Text="Ударение в слове" Style="{StaticResource SectionHeader}"
                                                            ToolTip="Клик по гласной ставит на неё ударение. Повторный клик по «е»: сначала «ё», потом просто «е» без ударения. Клик по другой гласной переносит ударение туда. «ё» всегда ударная." />
-                                                <ToggleButton x:Name="UniqueStressToggle" Content="УНИК" HorizontalAlignment="Right" VerticalAlignment="Top"
-                                                              ToolTip="Редкий случай: клик по любой букве слова ставит ударение на неё. Нужно для слов вроде «свѣ́тлостію», «мѣ́дъ», где ударная не гласная. Пока кнопка выключена, панель под ней не показывается." />
+                                                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Top">
+                                                    <ToggleButton x:Name="UniqueStressToggle" Content="УНИК" VerticalAlignment="Top"
+                                                                  ToolTip="Редкий случай: клик по любой букве слова ставит ударение на неё. Нужно для слов вроде «свѣ́тлостію», «мѣ́дъ», где ударная не гласная. Пока кнопка выключена, панель под ней не показывается." />
+                                                    <Button x:Name="ConfirmStressButton" Content="Да ✓" MinWidth="96" Padding="14,8" Margin="8,0,0,0"
+                                                            VerticalAlignment="Top"
+                                                            Background="{StaticResource Accent}" Foreground="White" FontWeight="SemiBold"
+                                                            ToolTip="Принять вариант (ударение и/или исправленное написание). На отмеченном образце принимается общая форма группы, на снятом флажком — его отдельное ударение (Ctrl+Enter)" />
+                                                </StackPanel>
                                             </Grid>
                                             <WrapPanel x:Name="StressChoicesPanel" Margin="0,2,0,6" />
                                             <TextBlock x:Name="VowelPanelHint" Style="{StaticResource Note}" Margin="0,0,0,4" Visibility="Collapsed"
@@ -541,13 +833,13 @@
 
                                         <!-- Редкий случай: ударение падает не на гласную (ѣ, і, ѧ и другие буквы).
                                              Показывается только при включённой кнопке УНИК: нужна она для считанных слов. -->
-                                        <StackPanel x:Name="UniqueStressPanelBox" Grid.Row="2" Margin="0,0,0,8" Visibility="Collapsed">
+                                        <StackPanel x:Name="UniqueStressPanelBox" Grid.Row="3" Margin="0,0,0,8" Visibility="Collapsed">
                                             <TextBlock Text="Уникальное ударение" Style="{StaticResource SectionHeader}"
                                                        ToolTip="Кликните по любой букве слова — ударение встанет на неё. Нужно для редких случаев, когда ударная не гласная: «свѣ́тлостію», «мѣ́дъ» и подобные слова древней орфографии." />
                                             <WrapPanel x:Name="UniqueStressPanel" Margin="0,2,0,0" />
                                         </StackPanel>
 
-                                        <Border Grid.Row="3" Background="{StaticResource Paper}" BorderBrush="{StaticResource Rule}"
+                                        <Border Grid.Row="4" Background="{StaticResource Paper}" BorderBrush="{StaticResource Rule}"
                                                 BorderThickness="1" CornerRadius="4" Padding="10">
                                             <DockPanel>
                                                 <TextBlock DockPanel.Dock="Top" Text="Фрагмент текста" FontWeight="SemiBold" Margin="0,0,0,4"
@@ -567,7 +859,7 @@
                                             </DockPanel>
                                         </Border>
 
-                                        <Expander Grid.Row="4" Margin="0,8,0,0" Header="Опечатка и дополнительные словоформы"
+                                        <Expander Grid.Row="5" Margin="0,8,0,0" Header="Опечатка и дополнительные словоформы"
                                                   ToolTip="Слово с опечаткой правьте прямо в тексте выше — кнопки ударения перестроятся под новое написание. Допускается небольшое число отличий (до 3 букв), чтобы случайно не заменить другое слово. Здесь же можно добавить дополнительные словоформы вручную.">
                                             <StackPanel Margin="0,6,0,0">
                                                 <ComboBox x:Name="GrammaticalCaseComboBox" Width="260" HorizontalAlignment="Left" Margin="0,0,0,4" />
@@ -578,23 +870,30 @@
                                     </Grid>
                                 </ScrollViewer>
 
-                                <!-- Кнопка «Да ✓» всегда на виду: рабочая область прокручивается, а приём — нет. -->
-                                <DockPanel Grid.Row="1" Margin="0,8,0,0">
-                                    <Button x:Name="ConfirmStressButton" DockPanel.Dock="Right" Content="Да ✓" MinWidth="96" Padding="14,8" Margin="8,0,0,0"
-                                            Background="{StaticResource Accent}" Foreground="White" FontWeight="SemiBold"
-                                            ToolTip="Принять вариант (ударение и/или исправленное написание) и перейти к следующей группе (Ctrl+Enter)" />
-                                    <TextBlock VerticalAlignment="Center" Style="{StaticResource Note}" TextWrapping="Wrap"
-                                               Text="Правка применяется ко всей группе точных совпадений слова." />
-                                </DockPanel>
+                                <!-- Кнопка «Да ✓» теперь вверху справа, рядом с «УНИК»: выбрал ударение — сразу подтвердил. -->
+                                <TextBlock Grid.Row="1" Margin="0,8,0,0" Style="{StaticResource Note}" TextWrapping="Wrap"
+                                           Text="Правка идёт по отмеченным образцам (общая форма группы). Снимите галочку у нужного случая и задайте ему отдельное ударение — оно применится только к этому вхождению. Листайте случаи кнопками «◀ Случай / Случай ▶»; «Да ✓» на снятом случае само переходит к следующему." />
                             </Grid>
                         </Grid>
 
                         <WrapPanel Grid.Row="2" Margin="0,8,0,0">
-                            <Button x:Name="PreviousButton" Content="◀ Предыдущее" IsEnabled="False" />
-                            <Button x:Name="NextButton" Content="Следующее ▶" IsEnabled="False" />
-                            <Button x:Name="SaveCorrectionButton" Content="Применить всё и сохранить" IsEnabled="False"
-                                    Background="{StaticResource Accent}" Foreground="White"
-                                    ToolTip="Проходит по всем группам с правками и сохраняет результат одним файлом" />
+                            <Button x:Name="PreviousButton" Content="◀ Предыдущее слово" IsEnabled="False"
+                                    ToolTip="Перейти к предыдущему слову (группе)" />
+                            <Button x:Name="NextButton" Content="Следующее слово ▶" IsEnabled="False"
+                                    ToolTip="Перейти к следующему слову (группе)" />
+                            <Button x:Name="PreviousCaseButton" Content="◀ Случай" IsEnabled="False"
+                                    ToolTip="Предыдущий случай (вхождение) этого же слова в списке примеров" />
+                            <Button x:Name="NextCaseButton" Content="Случай ▶" IsEnabled="False"
+                                    ToolTip="Следующий случай (вхождение) этого же слова. Снимите у нужного случая галочку, чтобы задать ему отдельное ударение." />
+                            <TextBlock x:Name="CasePositionTextBlock" VerticalAlignment="Center" Margin="6,0,12,0"
+                                       Style="{StaticResource Note}" />
+                            <Button x:Name="SaveProgressButton" Content="Сохранить" IsEnabled="False"
+                                    ToolTip="Сохраняет прогресс: пометки «Проверено» и уже применённые к файлу правки. Вернуться к работе можно кнопкой «Продолжить работу»." />
+                            <Button x:Name="SaveCorrectionButton" Content="Сохранить группу и применить" IsEnabled="False"
+                                    ToolTip="Применяет правку выбранной группы и сохраняет её в итоговый файл" />
+                            <Button x:Name="FinishWorkButton" Content="Завершить работу" IsEnabled="False"
+                                    Background="{StaticResource Accent}" Foreground="White" FontWeight="SemiBold"
+                                    ToolTip="Собирает итоговый файл «имя_итог» из базы add-stress и всех внесённых правок" />
                         </WrapPanel>
                     </Grid>
                 </Border>
@@ -605,7 +904,7 @@
                 BorderThickness="1" CornerRadius="6" Padding="10,4">
             <ScrollViewer VerticalScrollBarVisibility="Auto" MaxHeight="60">
                 <TextBlock x:Name="FileStatusTextBlock" TextWrapping="Wrap" Foreground="{StaticResource Ink}"
-                           Text="Выберите отчёт и редактируемый файл на вкладке «Подготовка»." />
+                           Text="Выберите книгу на вкладке «1. Обработка книги»." />
             </ScrollViewer>
         </Border>
     </Grid>

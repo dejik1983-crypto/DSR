@@ -1,4 +1,4 @@
-using Microsoft.Win32;
+﻿using Microsoft.Win32;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
@@ -14,9 +14,31 @@ namespace FB2AccentConverter;
 public sealed partial class MainWindow : Window
 {
     private TextBox _input => InputTextBox;
-    private TextBox _output => OutputTextBox;
     private Button _prepareButton => PrepareButton;
     private bool _prepared;
+    // Всплывающие подсказки: их в приложении много, поэтому галочка в шапке убирает все сразу,
+    // а выбор сохраняется между запусками (см. WindowSettings в Program). Поле статическое:
+    // перехват открытия подсказки идёт на уровне классов элементов (см. статический
+    // конструктор ниже), и обработчик не привязан к конкретному окну.
+    private static bool _hideToolTips;
+
+    static MainWindow()
+    {
+        // Событие открытия подсказки зарегистрировано как «прямое» (RoutingStrategy.Direct) и
+        // поднимается на самом элементе, поэтому обработчик, повешенный на окно, его не получит.
+        // Перехватываем по классам: тогда подходит любой элемент — в том числе внутри шаблонов
+        // и в списках, которые создаются позже.
+        EventManager.RegisterClassHandler(typeof(UIElement), ToolTipService.ToolTipOpeningEvent,
+            new ToolTipEventHandler(OnAnyToolTipOpening));
+        EventManager.RegisterClassHandler(typeof(ContentElement), ToolTipService.ToolTipOpeningEvent,
+            new ToolTipEventHandler(OnAnyToolTipOpening));
+    }
+
+    // Handled = true не даёт подсказке открыться (см. PopupControlService.ShowToolTip).
+    private static void OnAnyToolTipOpening(object sender, ToolTipEventArgs e)
+    {
+        if (_hideToolTips) e.Handled = true;
+    }
     private CheckBox _illustrations => IllustrationsCheckBox;
     private ComboBox _model => ModelComboBox;
     private ComboBox _device => DeviceComboBox;
@@ -29,6 +51,8 @@ public sealed partial class MainWindow : Window
     private Program.ConversionControl? _conversionControl;
     private string? _diagnosticsPath;
     private Button _clearCacheButton => ClearCacheButton;
+    private Button _checkResourcesButton => CheckResourcesButton;
+    private Button _reloadResourcesButton => ReloadResourcesButton;
     private TextBlock _status => StatusText;
     private TextBlock _conversionStats => ConversionStatsText;
     private TextBlock _modelStatus => ModelStatusText;
@@ -54,7 +78,9 @@ public sealed partial class MainWindow : Window
     private string _activityStage = "Ожидание";
     private bool _activityWasDownloading;
     private string? _loadedFile;
+    private Program.BookWorkspace? _workspace;
     private bool _busy;
+    private bool _preparing;
 
     public MainWindow() : this(null, null) { }
 
@@ -63,7 +89,7 @@ public sealed partial class MainWindow : Window
         InitializeComponent();
         // Версия видна в подзаголовке и в заголовке окна — чтобы её не приходилось искать.
         VersionText.Text = "версия " + Program.DisplayVersion;
-        Title = $"DSR {Program.DisplayVersion} — ударения в FB2/TXT и доработка после конвертации";
+        Title = $"DSR {Program.DisplayVersion} — RUAccent + Silero и доработка книг";
         // Окно не должно быть выше рабочей области экрана: при крупном масштабе
         // заявленные 1280×920 превращаются в пиксели больше экрана, шапка уезжает
         // вверх, и содержимое вкладки наползает на заголовок с вкладками.
@@ -75,30 +101,40 @@ public sealed partial class MainWindow : Window
             Width = Math.Min(Width, workArea.Width);
             Height = Math.Min(Height, workArea.Height);
         }
-        foreach (var model in new[] { "turbo3.1", "turbo3", "turbo2", "big_poetry", "tiny" }) _model.Items.Add(model);
+        foreach (var model in new[] { "big_poetry" }) _model.Items.Add(model);
         _model.SelectedIndex = 0;
         _model.SelectionChanged += (_, _) => UpdateSelectedModelStatus();
         _device.Items.Add("CPU");
         _device.SelectedIndex = 0;
         BrowseInputButton.Click += (_, _) => SelectInput();
-        BrowseOutputButton.Click += (_, _) => SelectOutput();
+        OpenWorkspaceButton.Click += (_, _) => OpenWorkspaceFolder();
         _clearCacheButton.Click += (_, _) => ClearCache();
+        _checkResourcesButton.Click += async (_, _) => await CheckResourcesAsync();
+        _reloadResourcesButton.Click += async (_, _) => await ReloadResourcesAsync();
         HelpButton.Click += (_, _) => ShowProcessHelp();
+        HideToolTipsCheckBox.Checked += (_, _) => ApplyHideToolTips(true);
+        HideToolTipsCheckBox.Unchecked += (_, _) => ApplyHideToolTips(false);
+        _hideToolTips = Program.LoadHideToolTips();
+        HideToolTipsCheckBox.IsChecked = _hideToolTips;
         var canWrite = CanWriteToApplicationDirectory();
         _clearCacheButton.IsEnabled = canWrite;
+        _checkResourcesButton.IsEnabled = canWrite;
+        _reloadResourcesButton.IsEnabled = canWrite;
         _prepareButton.IsEnabled = canWrite;
         _convert.IsEnabled = canWrite;
         UpdateSelectedModelStatus();
         _status.Text = canWrite
-            ? "Нажмите «Подготовка к работе»: DSR настроит Python, загрузит и проверит модели."
+            ? "Выберите книгу и нажмите «Обработать книгу»: DSR прогонит её через RUAccent и Silero и соберёт расхождения."
             : "Папка приложения недоступна для записи. Переместите DSR.exe в папку с правами записи (например, не в Program Files).";
         _convert.Click += async (_, _) => await ConvertAsync();
+        ConvertStressAnchorButton.Click += async (_, _) => await ConvertWithStressAnchorAsync();
+        ConvertStagedButton.Click += async (_, _) => await ConvertStagedAsync();
         _pauseConversion.Click += (_, _) => ToggleConversionPause();
         _stopConversion.Click += (_, _) => StopConversion();
         _reviewWords.Click += (_, _) => OpenWordReview();
         ContinueWorkButton.Click += ContinueWork_Click;
         UpdateReviewButton();
-        _prepareButton.Click += async (_, _) => await PrepareAsync(automatic: false);
+        _prepareButton.Click += async (_, _) => { await PrepareAsync(automatic: false); };
         _gpuTest.Click += async (_, _) => await CheckGpuAsync();
         _resourceTimer.Tick += async (_, _) => await UpdateResourceUsageAsync();
         _resourceTimer.Start();
@@ -117,9 +153,9 @@ public sealed partial class MainWindow : Window
         // Высоты вкладок и редактора считаются от видимой области окна — один раз после
         // первой отрисовки, когда размеры элементов уже известны.
         ContentRendered += (_, _) => FitWindowLayoutSoon();
-        // Производные пути (отредактированный файл, файл правок, статистика) заполняются
-        // сами при выборе любой книги, результата, отчёта или редактируемого файла.
-        InputTextBox.TextChanged += (_, _) => UpdateDerivedFilePaths();
+        // Рабочая папка, результат RUAccent и производные пути (итог, словоформы,
+        // статистика) заполняются сами по выбранной книге.
+        InputTextBox.TextChanged += (_, _) => UpdateWorkspacePaths(suggestOutput: true);
         OutputTextBox.TextChanged += (_, _) => UpdateDerivedFilePaths();
         ReviewFileTextBox.TextChanged += (_, _) => UpdateDerivedFilePaths();
         Fb2FileTextBox.TextChanged += (_, _) => UpdateDerivedFilePaths();
@@ -129,14 +165,68 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Показывает пути, которые приложение назначает само: файл после применения правок,
-    /// файл сохранённых исправлений и отчёт со статистикой. Пусто, если исходный путь не выбран.
+    /// Считает рабочую папку по выбранной книге и подставляет путь результата RUAccent.
+    /// Всё, что создаёт DSR, лежит рядом с исходником в папке «DSR_имя книги»: отдельно
+    /// прогон RUAccent, отдельно Silero, затем расхождения, словоформы и итог. Исходник
+    /// при этом не изменяется.
+    /// </summary>
+    private void UpdateWorkspacePaths(bool suggestOutput)
+    {
+        var source = _loadedFile;
+        if (string.IsNullOrWhiteSpace(source) || !File.Exists(source))
+        {
+            _workspace = null;
+            SetTextBoxValue(WorkspaceTextBox, string.Empty);
+            SetTextBoxValue(OutputTextBox, string.Empty);
+            OpenWorkspaceButton.IsEnabled = false;
+            UpdateDerivedFilePaths();
+            UpdateReviewButton();
+            return;
+        }
+        _workspace = Program.WorkspaceFor(source);
+        SetTextBoxValue(WorkspaceTextBox, _workspace.Root);
+        OpenWorkspaceButton.IsEnabled = true;
+        if (suggestOutput || string.IsNullOrWhiteSpace(OutputTextBox.Text))
+            SetTextBoxValue(OutputTextBox, _workspace.RuAccentBook);
+        UpdateDerivedFilePaths();
+        UpdateReviewButton();
+    }
+
+    private static void SetTextBoxValue(TextBox box, string value)
+    {
+        if (!string.Equals(box.Text, value, StringComparison.Ordinal)) box.Text = value;
+    }
+
+    private void OpenWorkspaceFolder()
+    {
+        var folder = _workspace?.Root;
+        if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder))
+        {
+            _status.Text = "Рабочая папка появится после выбора книги.";
+            return;
+        }
+        OpenFolder(folder);
+    }
+
+    /// <summary>
+    /// Показывает пути, которые приложение назначает само: итоговый файл после правок,
+    /// файл сохранённых словоформ и отчёты со статистикой. Пусто, если книга не выбрана.
     /// </summary>
     private void UpdateDerivedFilePaths()
     {
-        SetDerivedPath(CorrectedPathLabel, CorrectedFileTextBox, DerivedPath(Fb2FileTextBox.Text, GetCorrectedOutputPath));
-        SetDerivedPath(FormsPathLabel, FormsFileTextBox, DerivedPath(ReviewFileTextBox.Text, Program.FormCorrectionsPathFor));
-        SetDerivedPath(StatsPathLabel, StatsFileTextBox, DerivedPath(OutputTextBox.Text, Program.StatisticsPathFor));
+        var workspace = _workspace;
+        SetDerivedPath(CorrectedPathLabel, CorrectedFileTextBox,
+            workspace != null && File.Exists(workspace.RuAccentBook) ? Program.CorrectedPathFor(workspace.RuAccentBook) : string.Empty);
+        SetDerivedPath(FormsPathLabel, FormsFileTextBox,
+            !string.IsNullOrWhiteSpace(ReviewFileTextBox.Text) ? Program.FormCorrectionsPathFor(ReviewFileTextBox.Text) : string.Empty);
+        SetDerivedPath(StatsPathLabel, StatsFileTextBox, workspace != null
+            ? string.Join("   ·   ", new[]
+            {
+                Path.GetFileName(workspace.RuAccentStatistics),
+                Path.GetFileName(workspace.SileroStatistics),
+                Path.GetFileName(workspace.ComparisonStatistics)
+            })
+            : string.Empty);
     }
 
     // Пустую строку показывать незачем: без выбранных файлов группа «Файлы» остаётся компактной.
@@ -148,37 +238,51 @@ public sealed partial class MainWindow : Window
         box.Text = value;
     }
 
-    private static string DerivedPath(string source, Func<string, string> build)
+    // Галочка «Выключить всплывающие подсказки»: сама подсказка не показывается обработчиком
+    // OnAnyToolTipOpening, здесь остаётся только запомнить выбор.
+    private void ApplyHideToolTips(bool hide)
     {
-        if (string.IsNullOrWhiteSpace(source)) return string.Empty;
-        try { return build(source); }
-        catch (Exception) { return string.Empty; }
+        if (_hideToolTips == hide) return;
+        _hideToolTips = hide;
+        Program.SaveHideToolTips(hide);
     }
 
     private void ShowProcessHelp()
     {
         MessageBox.Show(this,
             "Порядок работы\n\n" +
-            "1. Подготовка\n" +
-            "• Выберите модель RUAccent и устройство (CPU или CUDA).\n" +
-            "• Нажимать «Подготовка к работе» и «Проверить GPU / CUDA» не нужно: DSR готовит окружение сам при первом запуске, в новом месте, на новом компьютере и после смены модели.\n" +
-            "• Кнопки остаются для ручной перепроверки — например, если вы подключили другую видеокарту.\n" +
-            "• Выберите книгу FB2/TXT и путь результата, затем «Начать конвертацию».\n" +
-            "• Ниже — прогресс, статус, мониторинг (CPU, ОЗУ, GPU, сеть) и объём ресурсов, а также пути файлов, которые приложение создаст.\n\n" +
-            "2. ИИ-доработка (можно пропустить)\n" +
-            "• Выберите движок подсказок — свою модель на диске, Ollama или внешний API.\n" +
-            "• Нажмите «Подсказки ИИ по контексту»: в списке — слова, для которых нет ни словарного, ни вашего варианта.\n" +
-            "• Найденное — только подсказки, каждая принимается вручную на вкладке 3.\n\n" +
-            "3. Ручная доводка\n" +
+            "Исходная книга не изменяется. Всё, что создаёт DSR, складывается рядом с ней в папку «DSR_имя книги».\n\n" +
+            "1. Обработка книги\n" +
+            "• Выберите книгу FB2/TXT. Модель RUAccent и устройство (CPU или CUDA) можно не трогать — они подбираются сами.\n" +
+            "• Нажмите «Обработать книгу». DSR сначала прогонит её через RUAccent, затем через Silero и сравнит оба результата.\n" +
+            "• Или нажмите «Обработать по этапам (add-stress → RUAccent + Silero)» — рекомендуемый режим высокой точности: add-stress создаёт базу (его метки точные), затем RUAccent и Silero заполняют только слова без ударения в базе, а сравнение делит результат на «спорно», «сомнительно» и «неизвестно/опечатка». Совпавшие ударения принимаются автоматически.\n" +
+            "• Галочка «Второе мнение» включает прогон Silero. Выключите её, если Silero не установлен или нужен только RUAccent.\n" +
+            "• Нажимать «Подготовка к работе» и «Проверить GPU / CUDA» обычно не нужно: DSR готовит окружение сам при первом запуске, в новом месте, на новом компьютере и после смены модели. При первом запуске программа предупреждает, что скачает, и показывает шкалу прогресса.\n" +
+            "• Всё, что DSR скачивает (Python, пакеты, модели), лежит в папке «ресурсы» рядом с DSR.exe. Словари уже встроены в exe. Папку «ресурсы» можно удалить целиком — программа и ваши книги не пострадают.\n" +
+            "• Кнопки в разделе «Ресурсы»: «Проверить ресурсы» (глубокая проверка без скачивания), «Загрузить ресурсы заново» (удалить и скачать заново), «Очистить всё» (просто удалить папку ресурсов).\n" +
+            "• Результаты: в папке «DSR_имя книги» появляются прогон RUAccent, прогон Silero со своей статистикой и отчёт расхождений.\n\n" +
+            "2. Расхождения и ИИ (можно пропустить)\n" +
+            "• В списке — только слова, где RUAccent и Silero поставили ударение на разные гласные.\n" +
+            "• Выберите движок подсказок — свою модель на диске, Ollama или внешний API — и нажмите «Подсказки ИИ по расхождениям».\n" +
+            "• Найденное — только подсказки: где ИИ не уверен, слово просто уходит в ручную доводку без варианта.\n" +
+            "• Движок omogre разбирает не слово целиком, а каждый случай расхождения по предложению: омографы вроде «за́мок/замо́к» раскладываются по контексту.\n\n" +
+            "3. Контроль ИИ результатов (если запускали omogre)\n" +
+            "• Сверху — слово, ниже два окна: слева вариант 1 (общая форма группы), справа вариант 2 (случаи с другим ударением).\n" +
+            "• Один щелчок по случаю раскрывает фрагмент целиком — проверяемое слово подсвечено, как в ручной доводке.\n" +
+            "• Двойной щелчок переносит случай в другое окно; так же работают перетаскивание мышкой и кнопки ← → ; правая кнопка — меню: скопировать слово с контекстом, открыть предложение в Google, перенести случай.\n\n" +
+            "4. Ручная доводка\n" +
+            "• Здесь только опечатки и нераспознанные слова: то, что ИИ разобрала по случаям, принимают на вкладке 3 и сюда не повторяется.\n" +
             "• Выберите слово в списке и конкретный контекст.\n" +
-            "• Поставьте ударение (или исправьте опечатку прямо в поле «Исправленный вариант») и нажмите «Да ✓».\n" +
-            "• «Применить всё и сохранить» запишет правки в редактируемый файл. Исходная книга не изменяется.",
+            "• Поставьте ударение (или исправьте опечатку прямо в поле «Фрагмент текста») и нажмите «Да ✓».\n" +
+            "• «Сохранить» запоминает прогресс правок; «Завершить работу» собирает итог — файл «имя_итог» в рабочей папке. Исходная книга и прогоны движков не изменяются.\n\n" +
+            "Подсказки интерфейса\n" +
+            "• Всплывающих подсказок в программе много: у каждой кнопки и поля есть пояснение. Если они мешают, поставьте галочку «Выключить всплывающие подсказки» в шапке окна — она убирает их все сразу, и выбор сохраняется при следующем запуске.",
             "Как это работает", MessageBoxButton.OK, MessageBoxImage.Information);
     }
 
     private void UpdateSelectedModelStatus()
     {
-        var model = _model.SelectedItem?.ToString() ?? "turbo3.1";
+        var model = _model.SelectedItem?.ToString() ?? "big_poetry";
         var path = Path.Combine(Program.DataDirectory, "python", "Lib", "site-packages", "ruaccent", "nn", "nn_omograph", model);
         long bytes = 0;
         try
@@ -208,7 +312,8 @@ public sealed partial class MainWindow : Window
                 var root = Program.DataDirectory;
                 if (!Directory.Exists(root)) return $"Ресурсы будут размещены: {root}";
                 var areas = new[] { ("Python", Path.Combine(root, "python")),
-                    ("Модели и кэш", Path.Combine(root, "модели")), ("Кэш загрузок", Path.Combine(root, "кэш")) };
+                    ("Модели", Path.Combine(root, "модели")), ("Словари и движки", Path.Combine(root, "dictionary")),
+                    ("add-stress", Path.Combine(root, "add-stress")), ("Кэш загрузок", Path.Combine(root, "кэш")) };
                 var totals = areas.Select(area => (area.Item1, Size: Directory.Exists(area.Item2)
                     ? Directory.EnumerateFiles(area.Item2, "*", SearchOption.AllDirectories).Sum(file => new FileInfo(file).Length)
                     : 0L)).ToArray();
@@ -438,39 +543,75 @@ public sealed partial class MainWindow : Window
     {
         var dialog = new OpenFileDialog { Filter = "Книги и тексты (*.fb2;*.txt)|*.fb2;*.txt|FictionBook (*.fb2)|*.fb2|Текстовые файлы (*.txt)|*.txt", CheckFileExists = true };
         if (dialog.ShowDialog(this) != true) return;
-        _loadedFile = dialog.FileName;
-        _input.Text = _loadedFile;
-        var extension = Path.GetExtension(_loadedFile);
+        var extension = Path.GetExtension(dialog.FileName);
         if (!extension.Equals(".fb2", StringComparison.OrdinalIgnoreCase) && !extension.Equals(".txt", StringComparison.OrdinalIgnoreCase))
         {
             MessageBox.Show(this, "Поддерживаются только файлы FB2 и TXT.", "Неподдерживаемый формат", MessageBoxButton.OK, MessageBoxImage.Warning);
-            _loadedFile = null;
-            _input.Clear();
             return;
         }
-        _output.Text = Path.Combine(Path.GetDirectoryName(_loadedFile)!, Path.GetFileNameWithoutExtension(_loadedFile) + "_ударения" + extension);
-        UpdateReviewButton();
-        if (extension.Equals(".txt", StringComparison.OrdinalIgnoreCase))
+        _loadedFile = dialog.FileName;
+        _input.Text = _loadedFile; // запускает UpdateWorkspacePaths: рабочая папка и результат RUAccent
+        _illustrations.IsEnabled = extension.Equals(".fb2", StringComparison.OrdinalIgnoreCase);
+        // Смена книги начинается с чистого листа: старые список слов и пути другой книги
+        // не должны оставаться на экране.
+        ClearReviewStateForNewBook();
+        // Если этот документ уже обрабатывали, готовые материалы подставляются и список
+        // слов загружается сразу — повторно прогонять движки не нужно.
+        if (LoadExistingWorkspaceMaterials())
         {
-            _status.Text = "TXT открыт. Строки и структура файла будут сохранены.";
-            _illustrations.IsEnabled = false;
-            return;
+            _status.Text = "Найдена рабочая папка этой книги: отчёт и файл правок загружены. Можно продолжить доработку или запустить обработку заново.";
         }
-        _status.Text = "FB2-файл выбран. Можно запускать обработку всей книги.";
-        _illustrations.IsEnabled = true;
+        else
+        {
+            UpdateDerivedFilePaths();
+            UpdateReviewButton();
+            _status.Text = extension.Equals(".txt", StringComparison.OrdinalIgnoreCase)
+                ? "TXT выбран. Строки и структура файла сохранятся; исходник не изменяется."
+                : "FB2 выбран. Иллюстрации можно сохранить; исходник не изменяется.";
+        }
     }
 
-    private void SelectOutput()
+    /// <summary>
+    /// Если у выбранной книги уже есть проработанная рабочая папка, подставляет её файлы
+    /// и сразу загружает список слов в редактор — не дожидаясь повторного прогона движков.
+    /// Приоритет у материалов этапного конвейера: отчёт расхождений и «база + совпадения».
+    /// </summary>
+    private bool LoadExistingWorkspaceMaterials()
     {
-        var extension = Path.GetExtension(_loadedFile ?? ".fb2");
-        var filter = extension.Equals(".txt", StringComparison.OrdinalIgnoreCase) ? "Текстовый файл (*.txt)|*.txt" : "Книга FictionBook (*.fb2)|*.fb2";
-        var dialog = new SaveFileDialog { Filter = filter, DefaultExt = extension, AddExtension = true, FileName = Path.GetFileName(_output.Text) };
-        if (!string.IsNullOrWhiteSpace(_output.Text)) dialog.InitialDirectory = Path.GetDirectoryName(_output.Text);
-        if (dialog.ShowDialog(this) == true)
-        {
-            _output.Text = dialog.FileName;
-            UpdateReviewButton();
-        }
+        var workspace = _workspace;
+        if (workspace == null) return false;
+        var review = File.Exists(workspace.ComparisonReport) ? workspace.ComparisonReport
+            : File.Exists(workspace.RuAccentReview) ? workspace.RuAccentReview : null;
+        var book = File.Exists(workspace.StagedAppliedBook) ? workspace.StagedAppliedBook
+            : File.Exists(workspace.BaseBook) ? workspace.BaseBook
+            : File.Exists(workspace.RuAccentBook) ? workspace.RuAccentBook : null;
+        if (review == null && book == null) return false;
+        if (book != null) SetTextBoxValue(OutputTextBox, book);
+        SetReviewPaths(review, book);
+        UpdateDerivedFilePaths();
+        UpdateReviewButton();
+        RememberSession();
+        ReviewTabs.SelectedIndex = 1;
+        return true;
+    }
+
+    /// <summary>Сбрасывает список слов и пути правок при выборе другой книги.</summary>
+    private void ClearReviewStateForNewBook()
+    {
+        _reviewPath = null;
+        _outputPath = null;
+        SetTextBoxValue(ReviewFileTextBox, string.Empty);
+        SetTextBoxValue(Fb2FileTextBox, string.Empty);
+        _entries.Clear();
+        _llmSuggestions.Clear();
+        _llmRejected.Clear();
+        _controlVariants.Clear();
+        _controlGroups = new();
+        _controlGroupIndex = -1;
+        _hasModelDisagreements = false;
+        ApplyReviewItems();
+        UpdateEditorEnabled();
+        UpdateNavigationState();
     }
 
     // Гарантирует, что окружение Python готово до начала конвертации, и показывает
@@ -565,44 +706,45 @@ public sealed partial class MainWindow : Window
     private async Task ConvertAsync()
     {
         if (string.IsNullOrWhiteSpace(_loadedFile) || !File.Exists(_loadedFile)) { _status.Text = "Сначала выберите существующий FB2- или TXT-файл."; return; }
-        if (string.IsNullOrWhiteSpace(_output.Text)) { _status.Text = "Укажите путь сохранения результата."; return; }
-        if (string.Equals(Path.GetFullPath(_loadedFile), Path.GetFullPath(_output.Text), StringComparison.OrdinalIgnoreCase)) { _status.Text = "Результат не должен совпадать с исходным файлом."; return; }
         var sourceExtension = Path.GetExtension(_loadedFile);
-        if (!sourceExtension.Equals(".txt", StringComparison.OrdinalIgnoreCase) && !sourceExtension.Equals(".fb2", StringComparison.OrdinalIgnoreCase)) { _status.Text = "Поддерживаются только форматы FB2 и TXT."; return; }
-        var expectedExtension = sourceExtension.Equals(".txt", StringComparison.OrdinalIgnoreCase) ? ".txt" : ".fb2";
-        if (!Path.GetExtension(_output.Text).Equals(expectedExtension, StringComparison.OrdinalIgnoreCase)) { _status.Text = $"Для входного {expectedExtension.ToUpperInvariant()} укажите выходной файл с расширением {expectedExtension}."; return; }
+        if (!sourceExtension.Equals(".fb2", StringComparison.OrdinalIgnoreCase) && !sourceExtension.Equals(".txt", StringComparison.OrdinalIgnoreCase)) { _status.Text = "Поддерживаются только форматы FB2 и TXT."; return; }
         if (!_prepared || !Directory.Exists(Program.DataDirectory))
         {
-            _status.Text = "Сначала нажмите «Подготовка к работе» и дождитесь сообщения о готовности.";
+            _status.Text = "Окружение ещё готовится. Дождитесь сообщения «Приложение готово к работе» и нажмите «Обработать книгу» снова.";
             return;
         }
         var input = _loadedFile!;
-        var output = _output.Text;
-        var model = _model.SelectedItem?.ToString() ?? "turbo3.1";
+        _workspace = Program.WorkspaceFor(input);
+        var model = _model.SelectedItem?.ToString() ?? "big_poetry";
         var device = _device.SelectedItem?.ToString() ?? "CPU";
         var includeImages = _illustrations.IsChecked == true;
-        StartActivity("Подготовка конвертации");
+        var runSilero = SileroCompareCheckBox.IsChecked == true;
+        StartActivity("Подготовка обработки");
         SetBusy(true);
         _conversionControl = new Program.ConversionControl();
         _pauseConversion.IsEnabled = true;
         _stopConversion.IsEnabled = true;
         _pauseConversion.Content = "Пауза";
-        _diagnosticsPath = Program.StatisticsPathFor(output);
+        _diagnosticsPath = _workspace.RuAccentStatistics;
         var conversionWatch = Stopwatch.StartNew();
         var totalUnits = 0;
         var sourceBytes = new FileInfo(input).Length;
-        var sourceCharacters = new FileInfo(input).Length;
-        if (Path.GetExtension(input).Equals(".txt", StringComparison.OrdinalIgnoreCase))
+        var sourceCharacters = sourceBytes;
+        if (sourceExtension.Equals(".txt", StringComparison.OrdinalIgnoreCase))
         {
             try { sourceCharacters = File.ReadAllText(input).Length; } catch (IOException) { }
         }
         _conversionStats.Text = $"Файл: {sourceBytes / 1024d / 1024d:0.00} МБ · около {sourceCharacters:N0} символов · прошло 00:00:00 · осталось —";
         _modelStatus.Text = $"Загружается модель омографов {model}; размер будет показан во время скачивания…";
-        _status.Text = $"Готовлю Python-компоненты; модель омографов: {model} ({device}).";
+        _status.Text = runSilero
+            ? $"Обрабатываю книгу: сначала RUAccent, затем Silero и сравнение (модель {model}, {device})."
+            : $"Обрабатываю книгу только движком RUAccent (модель {model}, {device}); Silero выключен.";
         _progress.Value = 0;
         try
         {
-            await Task.Run(() => Program.ConvertInteractive(input, output, model, device, includeImages,
+            var workspace = await Task.Run(() => Program.ConvertBookInteractive(input, model, device, includeImages, "CPU", runSilero,
+                // Сообщения обоих движков идут через этот обработчик: загрузка модели,
+                // этапы, ошибки — всё попадает в строку состояния, статистику и прогресс.
                 message => Dispatcher.Invoke(() =>
                 {
                     if (message.StartsWith("DIAGNOSTICS:", StringComparison.Ordinal))
@@ -654,38 +796,62 @@ public sealed partial class MainWindow : Window
                     _progress.IsIndeterminate = false;
                     _progress.Value = total == 0 ? 100 : completed * 100.0 / total;
                     var remaining = completed > 0 ? TimeSpan.FromSeconds(conversionWatch.Elapsed.TotalSeconds * Math.Max(0, total - completed) / completed) : (TimeSpan?)null;
-                    _status.Text = $"Обработка текста: {completed:N0} из {total:N0} фрагментов ({_progress.Value:0}%).";
+                    _status.Text = $"RUAccent расставляет ударения: {completed:N0} из {total:N0} фрагментов ({_progress.Value:0}%).";
                     _conversionStats.Text = $"Файл: {sourceBytes / 1024d / 1024d:0.00} МБ · около {sourceCharacters:N0} символов · прошло {FormatElapsed(conversionWatch.Elapsed)} · осталось {(remaining.HasValue ? FormatElapsed(remaining.Value) : "расчёт…")}";
-                }), _conversionControl!));
+                }),
+                stage => Dispatcher.Invoke(() => { SetActivityStage(stage); }),
+                _conversionControl!));
             conversionWatch.Stop();
-            _conversionStats.Text = $"Файл: {sourceBytes / 1024d / 1024d:0.00} МБ · около {sourceCharacters:N0} символов · обработано {totalUnits:N0} фрагментов за {FormatElapsed(conversionWatch.Elapsed)} · отчёт слов рядом с исходником";
-            _status.Text = "Конвертация завершена: " + output;
-            StopActivity("Конвертация завершена");
+            _workspace = workspace;
+            // Пути результата и отчёта — прямо из рабочей папки: вкладки 2, 3 и 4 сразу
+            // готовы к работе, ничего искать вручную не нужно.
+            SetTextBoxValue(WorkspaceTextBox, workspace.Root);
+            SetTextBoxValue(OutputTextBox, workspace.RuAccentBook);
+            var review = runSilero && File.Exists(workspace.ComparisonReport) ? workspace.ComparisonReport
+                : File.Exists(workspace.RuAccentReview) ? workspace.RuAccentReview
+                : File.Exists(workspace.ComparisonReport) ? workspace.ComparisonReport : null;
+            var book = File.Exists(workspace.RuAccentBook) ? workspace.RuAccentBook : null;
+            SetTextBoxValue(ReviewFileTextBox, review ?? string.Empty);
+            SetTextBoxValue(Fb2FileTextBox, book ?? string.Empty);
+            SetReviewPaths(review, book);
+            UpdateDerivedFilePaths();
             UpdateReviewButton();
-            var outputExtension = Path.GetExtension(output);
-            if ((outputExtension.Equals(".fb2", StringComparison.OrdinalIgnoreCase) || outputExtension.Equals(".txt", StringComparison.OrdinalIgnoreCase)) && _reviewWords.IsEnabled)
-            {
-                var reviewPath = Program.ReviewPathFor(output);
-                SetReviewPaths(reviewPath, output);
-                RememberSession();
-                ReviewTabs.SelectedIndex = 1;
-                UpdateReviewButton();
-            }
+            RememberSession();
+            // С Silero дальше идём на вкладку расхождений; без него — сразу к ручной доводке.
+            ReviewTabs.SelectedIndex = runSilero ? 1 : 3;
+            _conversionStats.Text = $"Файл: {sourceBytes / 1024d / 1024d:0.00} МБ · около {sourceCharacters:N0} символов · обработано {totalUnits:N0} фрагментов за {FormatElapsed(conversionWatch.Elapsed)} · всё в папке {workspace.Root}";
+            _status.Text = (runSilero
+                ? "Обработка завершена: RUAccent, Silero и сравнение готовы. "
+                : "Обработка завершена: результат RUAccent готов. ") + workspace.Root;
+            StopActivity("Обработка завершена");
+            var disagreements = _entries.Count(HasModelDisagreement);
+            // Третья категория сравнения: слова без ударения у обеих моделей.
+            var withoutStress = _entries.Count(entry => !HasModelDisagreement(entry));
+            if (!runSilero)
+                FileStatusTextBlock.Text = "Silero был выключен: для ручной доводки подготовлен список слов, которые RUAccent оставил без ударения.";
+            else if (disagreements > 0)
+                FileStatusTextBlock.Text = $"Расхождений RUAccent и Silero: {disagreements:N0} случаев" +
+                    (withoutStress > 0 ? $"; без ударения у обеих моделей: {withoutStress:N0}" : string.Empty) +
+                    ". Вкладка «2. Расхождения и ИИ» — разбор по контексту (omogre) на вкладке «3. Контроль ИИ результатов», затем ручная доводка.";
+            else if (withoutStress > 0)
+                FileStatusTextBlock.Text = $"Расхождений нет: модели совпали. Без ударения у обеих моделей: {withoutStress:N0} — задайте ударение на вкладке «4. Ручная доводка».";
+            else
+                FileStatusTextBlock.Text = "RUAccent и Silero совпали: расхождений нет, ручная доводка не требуется.";
             _ = UpdateResourceSizeStatusAsync();
-            if (MessageBox.Show(this, "Книга готова. Открыть папку с результатом?", "Готово", MessageBoxButton.YesNo, MessageBoxImage.Information) == MessageBoxResult.Yes)
-                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", $"/select,\"{output}\"") { UseShellExecute = true });
+            if (MessageBox.Show(this, "Обработка книги завершена. Открыть рабочую папку с результатами?", "Готово", MessageBoxButton.YesNo, MessageBoxImage.Information) == MessageBoxResult.Yes)
+                OpenFolder(workspace.Root);
         }
         catch (OperationCanceledException)
         {
             conversionWatch.Stop();
             StopActivity("Обработка остановлена");
-            _status.Text = "Обработка остановлена. Отчёт диагностики сохранён рядом с выходным файлом.";
+            _status.Text = "Обработка остановлена. Уже готовые прогоны и отчёты остались в рабочей папке.";
             _conversionStats.Text = $"Остановлено через {FormatElapsed(conversionWatch.Elapsed)} · отчёт: {_diagnosticsPath}";
         }
         catch (Exception ex)
         {
-            StopActivity("Ошибка конвертации");
-            Program.LogError($"Ошибка конвертации файла: {input} -> {output}", ex);
+            StopActivity("Ошибка обработки");
+            Program.LogError($"Ошибка обработки книги: {input}", ex);
             _status.Text = "Ошибка: " + ex.GetBaseException().Message + $"\nПодробности: {Program.LogFilePath}\nОтчёт: {_diagnosticsPath}";
         }
         finally
@@ -716,22 +882,144 @@ public sealed partial class MainWindow : Window
         }
     }
 
+    // Кнопка активна, когда есть готовый отчёт: расхождения (или список неударенных
+    // слов RUAccent, если Silero выключен). Отчёт и книга для правок берутся из полей
+    // вкладки 1 — они заполняются автоматически после обработки.
+     private async Task ConvertWithStressAnchorAsync()
+     {
+         if (string.IsNullOrWhiteSpace(_loadedFile) || !File.Exists(_loadedFile)) { _status.Text = "Сначала выберите существующий FB2- или TXT-файл."; return; }
+         var sourceExtension = Path.GetExtension(_loadedFile);
+         if (!sourceExtension.Equals(".fb2", StringComparison.OrdinalIgnoreCase) && !sourceExtension.Equals(".txt", StringComparison.OrdinalIgnoreCase)) { _status.Text = "Поддерживаются только форматы FB2 и TXT."; return; }
+         var input = _loadedFile!;
+         _workspace = Program.WorkspaceFor(input);
+         StartActivity("Подготовка обработки");
+         SetBusy(true);
+         _conversionControl = new Program.ConversionControl();
+         _pauseConversion.IsEnabled = false;
+         _stopConversion.IsEnabled = true;
+         _status.Text = "Обрабатываю книгу через add-stress-to-epub (spaCy + Wiktionary)…";
+         _progress.IsIndeterminate = true;
+         var output = Path.Combine(_workspace.Root, Path.GetFileNameWithoutExtension(input) + "_add-stress.fb2");
+         if (sourceExtension.Equals(".txt", StringComparison.OrdinalIgnoreCase)) output = Path.Combine(_workspace.Root, Path.GetFileNameWithoutExtension(input) + "_add-stress.txt");
+         try
+         {
+             var progress = new Progress<(int Completed, int Total, string Message)>(u => Dispatcher.Invoke(() =>
+             {
+                 _status.Text = u.Message;
+                 if (u.Total > 0) { _progress.IsIndeterminate = false; _progress.Value = u.Completed * 100.0 / u.Total; }
+             }));
+             await Task.Run(() => Program.ConvertWithStressAnchorInteractive(input, output, "CPU", progress, _conversionControl!));
+             SetTextBoxValue(OutputTextBox, output);
+             SetTextBoxValue(WorkspaceTextBox, _workspace.Root);
+             _status.Text = "Готово: " + output;
+             _progress.Value = 100;
+         }
+         catch (Exception ex)
+         {
+             _status.Text = "Ошибка: " + ex.Message;
+         }
+         finally
+         {
+             SetBusy(false);
+             _stopConversion.IsEnabled = false;
+         }
+     }
+
+     /// <summary>
+     /// Этапный конвейер: add-stress создаёт базу, RUAccent и Silero заполняют только
+     /// оставленные базой слова без ударения, затем сравнение делит расхождения на
+     /// «спорно», «сомнительно» и «неизвестно/опечатка». Редактируемый файл — база.
+     /// </summary>
+     private async Task ConvertStagedAsync()
+     {
+         if (string.IsNullOrWhiteSpace(_loadedFile) || !File.Exists(_loadedFile)) { _status.Text = "Сначала выберите существующий FB2- или TXT-файл."; return; }
+         var sourceExtension = Path.GetExtension(_loadedFile);
+         if (!sourceExtension.Equals(".fb2", StringComparison.OrdinalIgnoreCase) && !sourceExtension.Equals(".txt", StringComparison.OrdinalIgnoreCase)) { _status.Text = "Поддерживаются только форматы FB2 и TXT."; return; }
+         var input = _loadedFile!;
+         var model = _model.SelectedItem?.ToString() ?? "big_poetry";
+         var device = _device.SelectedItem?.ToString() ?? "CPU";
+         StartActivity("Подготовка этапного прогона");
+         SetBusy(true);
+         _conversionControl = new Program.ConversionControl();
+         _pauseConversion.IsEnabled = true;
+         _stopConversion.IsEnabled = true;
+         _pauseConversion.Content = "Пауза";
+         _status.Text = "Этапный прогон: база (add-stress) → RUAccent + Silero → сравнение…";
+         _progress.IsIndeterminate = true;
+         var conversionWatch = Stopwatch.StartNew();
+         try
+         {
+             var workspace = await Task.Run(() => Program.ConvertStagedBookInteractive(
+                 input, model, device, device,
+                 text => Dispatcher.Invoke(() => _status.Text = text),
+                 (completed, total) => Dispatcher.Invoke(() =>
+                 {
+                     _progress.IsIndeterminate = false;
+                     _progress.Value = total == 0 ? 100 : completed * 100.0 / total;
+                 }),
+                 stage => Dispatcher.Invoke(() => SetActivityStage(stage)),
+                 _conversionControl!));
+             conversionWatch.Stop();
+             _workspace = workspace;
+             // Редактируемый файл — «база + совпадения»: именно он становится итогом после правок.
+             SetTextBoxValue(WorkspaceTextBox, workspace.Root);
+             var applied = File.Exists(workspace.StagedAppliedBook) ? workspace.StagedAppliedBook : workspace.BaseBook;
+             SetTextBoxValue(OutputTextBox, applied);
+             var review = File.Exists(workspace.ComparisonReport) ? workspace.ComparisonReport : null;
+             var book = File.Exists(applied) ? applied : null;
+             SetTextBoxValue(ReviewFileTextBox, review ?? string.Empty);
+             SetTextBoxValue(Fb2FileTextBox, book ?? string.Empty);
+             SetReviewPaths(review, book);
+             UpdateDerivedFilePaths();
+             UpdateReviewButton();
+             RememberSession();
+             ReviewTabs.SelectedIndex = 1;
+             _progress.IsIndeterminate = false;
+             _progress.Value = 100;
+             _conversionStats.Text = $"Этапный прогон за {FormatElapsed(conversionWatch.Elapsed)} · всё в папке {workspace.Root}";
+             _status.Text = "Этапный прогон завершён: база, RUAccent, Silero и сравнение готовы. " + workspace.Root;
+             StopActivity("Этапный прогон завершён");
+             FileStatusTextBlock.Text = "Редактируемый файл — «база + совпадение»: база add-stress плюс ударения, в которых RUAccent и Silero совпали. " +
+                 "Вкладка «2. Расхождения и ИИ»: «спорно», «сомнительно» и «неизвестно/опечатка». Кнопка «Завершить работу» соберёт итоговый файл.";
+         }
+         catch (OperationCanceledException)
+         {
+             conversionWatch.Stop();
+             StopActivity("Этапный прогон остановлен");
+             _status.Text = "Этапный прогон остановлен. Уже готовые этапы остались в рабочей папке.";
+         }
+         catch (Exception ex)
+         {
+             StopActivity("Ошибка этапного прогона");
+             Program.LogError($"Ошибка этапного прогона: {input}", ex);
+             _status.Text = "Ошибка: " + ex.GetBaseException().Message + $"\nПодробности: {Program.LogFilePath}";
+         }
+         finally
+         {
+             if (_activityStartedAt != DateTime.MinValue) StopActivity("Этапный прогон завершён");
+             _conversionControl = null;
+             _pauseConversion.IsEnabled = false;
+             _stopConversion.IsEnabled = false;
+             _pauseConversion.Content = "Пауза";
+             SetBusy(false);
+         }
+     }
+
     private void UpdateReviewButton()
     {
-        var outputPath = _output.Text;
-        var extension = string.IsNullOrWhiteSpace(outputPath) ? "" : Path.GetExtension(outputPath);
-        var hasOutput = !string.IsNullOrWhiteSpace(outputPath) &&
-            (extension.Equals(".fb2", StringComparison.OrdinalIgnoreCase) || extension.Equals(".txt", StringComparison.OrdinalIgnoreCase));
-        var reviewPath = hasOutput ? Program.ReviewPathFor(outputPath) : null;
-        _reviewWords.Tag = hasOutput ? (reviewPath!, outputPath) : null;
-        // Окно ручной правки само позволяет выбрать оба файла, поэтому кнопку
-        // можно открыть и до конвертации/наличия отчёта.
-        _reviewWords.IsEnabled = true;
+        var reviewPath = !string.IsNullOrWhiteSpace(ReviewFileTextBox.Text) && File.Exists(ReviewFileTextBox.Text)
+            ? ReviewFileTextBox.Text : null;
+        var bookPath = !string.IsNullOrWhiteSpace(Fb2FileTextBox.Text) && File.Exists(Fb2FileTextBox.Text)
+            ? Fb2FileTextBox.Text : null;
+        _reviewWords.Tag = reviewPath != null ? (reviewPath, bookPath ?? reviewPath) : null;
+        _reviewWords.IsEnabled = reviewPath != null;
     }
 
     private void OpenWordReview()
     {
-        if (_reviewWords.Tag is ValueTuple<string, string> paths) SetReviewPaths(paths.Item1, paths.Item2);
+        var reviewPath = _reviewWords.Tag is ValueTuple<string, string> paths ? paths.Item1 : null;
+        var bookPath = _reviewWords.Tag is ValueTuple<string, string> known ? known.Item2 : null;
+        if (reviewPath != null) SetReviewPaths(reviewPath, bookPath);
         ReviewTabs.SelectedIndex = 1;
         UpdateReviewButton();
     }
@@ -750,13 +1038,10 @@ public sealed partial class MainWindow : Window
             return;
         }
         if (!string.IsNullOrWhiteSpace(session.Input) && File.Exists(session.Input)) InputTextBox.Text = session.Input;
-        if (!string.IsNullOrWhiteSpace(session.File) && File.Exists(session.File)) Fb2FileTextBox.Text = session.File;
-        ReviewFileTextBox.Text = session.Review;
+        SetReviewPaths(session.Review, string.IsNullOrWhiteSpace(session.File) || !File.Exists(session.File) ? null : session.File);
         UpdateDerivedFilePaths();
+        UpdateReviewButton();
         RefreshContinueWorkButton();
-        var title = LastSessionTitle();
-        if (title.Length > 0)
-            FileStatusTextBlock.Text = $"Можно вернуться к прошлой работе: {title}. Кнопка «Продолжить: {title}» — на вкладке «Подготовка».";
     }
 
     private void RefreshContinueWorkButton()
@@ -783,7 +1068,7 @@ public sealed partial class MainWindow : Window
         var path = !string.IsNullOrWhiteSpace(session.File) && File.Exists(session.File) ? session.File : session.Review;
         var title = Path.GetFileNameWithoutExtension(path);
         // Технические хвосты в названии кнопки только занимают место.
-        foreach (var suffix in new[] { "_corrected", "_проверка-слов", "_ударения" })
+        foreach (var suffix in new[] { "_итог", "_расхождения", "_ruaccent", "_corrected", "_проверка-слов", "_ударения" })
             if (title.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
             {
                 title = title[..^suffix.Length];
@@ -801,12 +1086,15 @@ public sealed partial class MainWindow : Window
             RestoreLastSession();
             return;
         }
+        var existingFile = !string.IsNullOrWhiteSpace(session.File) && File.Exists(session.File) ? session.File : null;
         _reviewPath = session.Review;
-        _outputPath = !string.IsNullOrWhiteSpace(session.File) && File.Exists(session.File) ? session.File : null;
+        _outputPath = existingFile;
         ReviewFileTextBox.Text = _reviewPath;
-        Fb2FileTextBox.Text = _outputPath ?? string.Empty;
-        SetReviewPaths(_reviewPath, _outputPath);
-        ReviewTabs.SelectedIndex = 2;
+        Fb2FileTextBox.Text = existingFile ?? string.Empty;
+        SetReviewPaths(_reviewPath, existingFile);
+        UpdateDerivedFilePaths();
+        UpdateReviewButton();
+        ReviewTabs.SelectedIndex = 1;
     }
 
     private void StopConversion()
@@ -817,48 +1105,59 @@ public sealed partial class MainWindow : Window
 
     /// <summary>
     /// Подготовка окружения. При automatic = true запускается сама при первом запуске,
-    /// в новом месте, на новом компьютере или после смены модели — без кнопок и без
-    /// сообщения «DSR готов» (оно нужно только при ручной проверке).
+    /// в новом месте, на новом компьютере или после смены модели — без кнопок и с
+    /// предупреждением о том, что будет скачано. force = true готовит заново даже при
+    /// наличии отметки (кнопка «Загрузить ресурсы заново»).
     /// </summary>
-    private async Task PrepareAsync(bool automatic)
+    private async Task<bool> PrepareAsync(bool automatic, bool force = false, SetupWindow? progress = null)
     {
-        if (_prepared && Directory.Exists(Program.DataDirectory))
+        if (_preparing) return false;
+        // Ранний выход только если подготовлено именно то, что выбрано сейчас:
+        // после смены модели отметка не подходит и модель нужно скачать.
+        var currentModel = _model.SelectedItem?.ToString() ?? "big_poetry";
+        if (!force && _prepared && Directory.Exists(Program.DataDirectory)
+            && PreparationStamp.TryRead() is { } readyStamp && readyStamp.IsValidFor(currentModel))
         {
             if (!automatic)
                 MessageBox.Show(this, "Приложение готово к работе.\n\nДоступно: обработка FB2 с сохранением структуры и изображений, обработка TXT с сохранением строк, настройка CPU/CUDA.", "DSR готов", MessageBoxButton.OK, MessageBoxImage.Information);
-            return;
+            return true;
         }
+        _preparing = true;
         StartActivity("Подготовка Python и моделей");
         SetBusy(true);
         var selectedDevice = _device.SelectedItem?.ToString() ?? "CPU";
-        var selectedModel = _model.SelectedItem?.ToString() ?? "turbo3.1";
-        _status.Text = automatic
+        var selectedModel = _model.SelectedItem?.ToString() ?? "big_poetry";
+        var statusText = automatic
             ? "Первый запуск в этом месте: настраиваю Python и зависимости, загружаю выбранную модель, выполняю тест обработки…"
             : "Настраиваю Python и зависимости, загружаю выбранную модель, выполняю тест обработки…";
-        try
+        _status.Text = statusText;
+
+        void Report(string message)
         {
-            Program.SetupProgress = message => Dispatcher.Invoke(() =>
+            Dispatcher.BeginInvoke(new Action(() =>
             {
                 _status.Text = message;
                 SetActivityStage(message);
                 SetActivityDownloading(message.Contains("Downloading", StringComparison.OrdinalIgnoreCase)
                     || message.Contains("Retrying", StringComparison.OrdinalIgnoreCase)
-                    || message.Contains("Загрузка", StringComparison.OrdinalIgnoreCase));
-            });
+                    || message.Contains("Загрузка", StringComparison.OrdinalIgnoreCase)
+                    || message.Contains("Скачиваю", StringComparison.OrdinalIgnoreCase));
+            }));
+            progress?.Report(message);
+        }
+
+        try
+        {
+            Report(statusText);
+            Program.SetupProgress = Report;
             try
             {
-                await Task.Run(() => Program.PrepareInteractive(selectedModel, selectedDevice,
-                    message => Dispatcher.Invoke(() =>
-                    {
-                        _status.Text = message;
-                        SetActivityStage(message);
-                        SetActivityDownloading(message.Contains("скач", StringComparison.OrdinalIgnoreCase)
-                            || message.Contains("загружа", StringComparison.OrdinalIgnoreCase));
-                    })));
+                await Task.Run(() => Program.PrepareInteractive(selectedModel, selectedDevice, Report));
             }
             finally { Program.SetupProgress = null; }
             _ = UpdateResourceSizeStatusAsync();
             Program.GpuProbeResult gpu;
+            Report("Проверяю видеокарту…");
             try { gpu = await Task.Run(Program.ProbeGpu); }
             catch (Exception ex)
             {
@@ -882,8 +1181,10 @@ public sealed partial class MainWindow : Window
             UpdateSelectedModelStatus();
             // Отметка о подготовке: в следующий раз всё это сделается само.
             PreparationStamp.Create(selectedModel, _device.SelectedItem?.ToString() ?? selectedDevice, _gpuStatus.Text).Save();
-            if (!automatic)
-                MessageBox.Show(this, "Приложение готово к работе.\n\nДоступно:\n• FB2 → FB2 с сохранением структуры и иллюстраций;\n• TXT → TXT с сохранением строк и форматирования текста;\n• CPU или доступная CUDA-видеокарта;\n• исходный файл не изменяется.\n\nДальше готовить вручную не нужно: при следующих запусках DSR проверит это сам.", "DSR готов", MessageBoxButton.OK, MessageBoxImage.Information);
+            progress?.Report("Подготовка завершена. Ресурсы готовы.", 100);
+            if (!automatic && progress == null)
+                MessageBox.Show(this, "Приложение готово к работе.\n\nДоступно:\n• FB2 → FB2 с сохранением структуры и иллюстраций;\n• TXT → TXT с сохранением строк и форматирования текста;\n• CPU или доступная CUDA-видеокарта;\n• исходный файл не изменяется.\n\nДальше готовить вручную не нужно: при следующих запусках DSR не проверяет всё заново.", "DSR готов", MessageBoxButton.OK, MessageBoxImage.Information);
+            return true;
         }
         catch (Exception ex)
         {
@@ -893,11 +1194,15 @@ public sealed partial class MainWindow : Window
             PreparationStamp.Clear();
             var details = $"Модель: {_model.SelectedItem}; устройство: {_device.SelectedItem}; Python: {Path.Combine(Program.DataDirectory, "python", "Scripts", "python.exe")}";
             Program.LogError("Подготовка к работе не завершена", new InvalidOperationException(details, ex));
-            _status.Text = "Подготовка не завершена: " + ex.GetBaseException().Message;
-            MessageBox.Show(this, _status.Text + $"\n\nПодробный лог: {Program.LogFilePath}", "Ошибка подготовки", MessageBoxButton.OK, MessageBoxImage.Error);
+            var message = ex.GetBaseException().Message;
+            _status.Text = "Подготовка не завершена: " + message;
+            if (progress != null) progress.Fail(message);
+            else MessageBox.Show(this, _status.Text + $"\n\nПодробный лог: {Program.LogFilePath}", "Ошибка подготовки", MessageBoxButton.OK, MessageBoxImage.Error);
+            return false;
         }
         finally
         {
+            _preparing = false;
             if (_activityStartedAt != DateTime.MinValue) StopActivity("Подготовка завершена");
             SetBusy(false);
             if (!CanWriteToApplicationDirectory())
@@ -905,6 +1210,8 @@ public sealed partial class MainWindow : Window
                 _prepareButton.IsEnabled = false;
                 _convert.IsEnabled = false;
                 _clearCacheButton.IsEnabled = false;
+                _checkResourcesButton.IsEnabled = false;
+                _reloadResourcesButton.IsEnabled = false;
             }
         }
     }
@@ -912,7 +1219,8 @@ public sealed partial class MainWindow : Window
     /// <summary>
     /// Готовим окружение сами, когда это действительно нужно: первый запуск, новое место,
     /// другой компьютер, новая версия DSR или другая модель обработки. Если отметка о
-    /// подготовке совпадает, дополнительно быстро проверяем, что окружение ещё живое.
+    /// подготовке совпадает и файлы модели на месте, проверок через Python не делаем;
+    /// глубокая проверка доступна кнопкой «Проверить ресурсы».
     /// </summary>
     private async Task AutoPrepareIfNeededAsync()
     {
@@ -931,26 +1239,49 @@ public sealed partial class MainWindow : Window
             Program.LogReview("Автоподготовка: папка приложения недоступна для записи.");
             return;
         }
-        var model = _model.SelectedItem?.ToString() ?? "turbo3.1";
+        var model = _model.SelectedItem?.ToString() ?? "big_poetry";
         Program.LogReview("Автоподготовка: проверяю отметку о подготовке (модель " + model + ").");
-        if (PreparationStamp.TryRead() is { } stamp && stamp.IsValidFor(model))
+        if (PreparationStamp.TryRead() is { } stamp && stamp.IsValidFor(model) && Program.IsModelPrepared(model))
         {
+            // Отметка совпала: никаких проверок через Python при каждом запуске.
+            // Глубокая проверка доступна отдельной кнопкой «Проверить ресурсы».
             _prepared = true;
             ApplyPreparationStamp(stamp, model);
-            if (await Task.Run(Program.VerifyEnvironmentQuick))
-            {
-                Program.LogReview("Автоподготовка: отметка подходит, окружение готово.");
-                return;
-            }
-            // Окружение переехало или сломалось — готовим заново.
-            Program.LogReview("Автоподготовка: быстрая проверка окружения не прошла, запускаю подготовку.");
-            _prepared = false;
+            Program.LogReview("Автоподготовка: отметка подходит, окружение готово.");
+            return;
         }
-        else
+
+        Program.LogReview("Автоподготовка: отметки нет или она не подходит, предлагаю подготовку.");
+        // Даём окну дорисоваться, чтобы диалог появился поверх готового интерфейса.
+        await Task.Delay(250);
+        var answer = MessageBox.Show(this,
+            "DSR нужно подготовить ресурсы для работы.\n\n"
+            + "Сейчас программа:\n"
+            + "• проверит Python и пакеты;\n"
+            + "• скачает RUAccent, ONNX Runtime и модель ударений;\n"
+            + "• при необходимости скачает переносимый Python.\n\n"
+            + "Понадобится интернет и около 1–2 ГБ свободного места. Всё скачанное будет "
+            + "лежать только в папке «ресурсы» рядом с DSR.exe. Сам DSR.exe и ваши книги "
+            + "не изменяются; папку «ресурсы» можно удалить и загрузить заново.\n\n"
+            + "Продолжить подготовку сейчас?",
+            "Первый запуск DSR", MessageBoxButton.YesNo, MessageBoxImage.Question);
+        if (answer != MessageBoxResult.Yes)
         {
-            Program.LogReview("Автоподготовка: отметки нет или она не подходит, запускаю подготовку.");
+            _status.Text = "Подготовка отложена. Когда будет интернет, нажмите «Подготовка к работе» "
+                + "или «Загрузить ресурсы заново» — программа скачает всё сама.";
+            return;
         }
-        await PrepareAsync(automatic: true);
+
+        var wizard = new SetupWindow(automatic: true) { Owner = this };
+        var completed = false;
+        wizard.Loaded += async (_, _) =>
+        {
+            completed = await PrepareAsync(automatic: true, force: true, progress: wizard);
+            if (completed) wizard.Complete();
+        };
+        wizard.ShowDialog();
+        if (!completed)
+            _status.Text = "Подготовка не завершена. Исправьте причину и нажмите «Загрузить ресурсы заново» — уже скачанное сохранится.";
     }
 
     private void ApplyPreparationStamp(PreparationStamp stamp, string model)
@@ -979,35 +1310,108 @@ public sealed partial class MainWindow : Window
         _prepareButton.IsEnabled = !busy && canWrite;
         _convert.IsEnabled = !busy && canWrite;
         _clearCacheButton.IsEnabled = !busy && canWrite;
+        _checkResourcesButton.IsEnabled = !busy && canWrite;
+        _reloadResourcesButton.IsEnabled = !busy && canWrite;
         _gpuTest.IsEnabled = !busy;
         BrowseInputButton.IsEnabled = !busy;
-        BrowseOutputButton.IsEnabled = !busy;
         _status.Opacity = busy ? 0.8 : 1;
         _progress.Visibility = busy ? Visibility.Visible : Visibility.Collapsed;
         _progress.IsIndeterminate = busy;
+    }
+
+    private async Task CheckResourcesAsync()
+    {
+        if (_busy || _preparing) return;
+        var model = _model.SelectedItem?.ToString() ?? "big_poetry";
+        StartActivity("Проверка ресурсов");
+        SetBusy(true);
+        _status.Text = "Проверяю ресурсы: словари, Python, пакеты и модель…";
+        try
+        {
+            var report = await Task.Run(() => Program.VerifyResources(model));
+            var healthy = report.StartsWith("Ресурсы в порядке", StringComparison.Ordinal);
+            MessageBox.Show(this, report, healthy ? "Ресурсы в порядке" : "Проверка ресурсов",
+                MessageBoxButton.OK, healthy ? MessageBoxImage.Information : MessageBoxImage.Warning);
+            _status.Text = healthy
+                ? "Проверка ресурсов пройдена: всё готово к работе."
+                : "Проверка ресурсов нашла проблемы. Нажмите «Загрузить ресурсы заново».";
+            if (!healthy)
+            {
+                if (MessageBox.Show(this, "Загрузить ресурсы заново сейчас? Уже скачанные файлы будут заменены.", "Загрузить ресурсы заново",
+                        MessageBoxButton.YesNo, MessageBoxImage.Question) == MessageBoxResult.Yes)
+                    await ReloadResourcesAsync();
+            }
+        }
+        catch (Exception error)
+        {
+            Program.LogError("Проверка ресурсов", error);
+            MessageBox.Show(this, "Не удалось проверить ресурсы: " + error.GetBaseException().Message
+                + $"\n\nПодробности: {Program.LogFilePath}", "Проверка ресурсов", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        finally
+        {
+            StopActivity("Проверка ресурсов завершена");
+            SetBusy(false);
+        }
+    }
+
+    private async Task ReloadResourcesAsync()
+    {
+        if (_busy || _preparing) return;
+        var answer = MessageBox.Show(this,
+            "Удалить текущие ресурсы и скачать всё заново?\n\n"
+            + "Будут удалены Python, модели, кэш, встроенные словари и служебные настройки DSR. "
+            + "Приложение DSR.exe и ваши книги не затрагиваются — всё нужное скачается снова "
+            + "в папку «ресурсы» рядом с программой.",
+            "Загрузить ресурсы заново", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+        if (answer != MessageBoxResult.Yes) return;
+
+        _prepared = false;
+        PreparationStamp.Clear();
+        try
+        {
+            Program.CloseResourceProcesses();
+            DeleteResourcesFolder();
+            _ = UpdateResourceSizeStatusAsync();
+        }
+        catch (Exception error)
+        {
+            Program.LogError("Не удалось очистить ресурсы перед повторной загрузкой", error);
+            MessageBox.Show(this, "Не удалось удалить папку ресурсов: " + error.GetBaseException().Message
+                + "\n\nЗакройте все окна DSR и повторите. Подробности: " + Program.LogFilePath,
+                "Загрузить ресурсы заново", MessageBoxButton.OK, MessageBoxImage.Error);
+            return;
+        }
+
+        var wizard = new SetupWindow(automatic: false) { Owner = this };
+        var completed = false;
+        wizard.Loaded += async (_, _) =>
+        {
+            completed = await PrepareAsync(automatic: false, force: true, progress: wizard);
+            if (completed) wizard.Complete();
+        };
+        wizard.ShowDialog();
+        if (!completed)
+            _status.Text = "Загрузка ресурсов не завершена. Повторите «Загрузить ресурсы заново» или проверьте интернет.";
     }
 
     private void ClearCache()
     {
         var cache = Program.DataDirectory;
         var answer = MessageBox.Show(this,
-            $"Удалить все ресурсы DSR ({cache})? Будут удалены Python, модели и кэш; при следующей подготовке они загрузятся повторно. Приложение и ваши книги не затрагиваются.",
-            "Очистка данных программы", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+            $"Удалить все ресурсы DSR ({cache})?\n\nБудут удалены Python, модели, кэш, встроенные словари и служебные настройки программы. "
+            + "Приложение DSR.exe и ваши книги не затрагиваются; при следующем запуске всё нужное загрузится заново.",
+            "Очистка ресурсов DSR", MessageBoxButton.YesNo, MessageBoxImage.Warning);
         if (answer != MessageBoxResult.Yes) return;
         try
         {
-            if (Directory.Exists(cache))
-            {
-                var normalizedRoot = Path.GetFullPath(Program.ApplicationDirectory).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-                var normalizedCache = Path.GetFullPath(cache).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-                if (!string.Equals(Path.GetDirectoryName(normalizedCache), normalizedRoot, StringComparison.OrdinalIgnoreCase)
-                    || !string.Equals(Path.GetFileName(normalizedCache), "ресурсы", StringComparison.OrdinalIgnoreCase))
-                    throw new InvalidOperationException($"Путь ресурсов не прошёл проверку безопасности: {normalizedCache}");
-                Directory.Delete(normalizedCache, recursive: true);
-            }
+            Program.CloseResourceProcesses();
+            DeleteResourcesFolder();
             _prepared = false;
             PreparationStamp.Clear();
             _clearCacheButton.IsEnabled = CanWriteToApplicationDirectory();
+            _checkResourcesButton.IsEnabled = _clearCacheButton.IsEnabled;
+            _reloadResourcesButton.IsEnabled = _clearCacheButton.IsEnabled;
             _prepareButton.IsEnabled = _clearCacheButton.IsEnabled;
             _convert.IsEnabled = _clearCacheButton.IsEnabled;
             _ = UpdateResourceSizeStatusAsync();
@@ -1018,6 +1422,19 @@ public sealed partial class MainWindow : Window
             Program.LogError("Не удалось удалить папку ресурсов", ex);
             _status.Text = "Не удалось удалить папку ресурсов: " + ex.Message + $" Лог: {Program.LogFilePath}";
         }
+    }
+
+    /// <summary>Удаляет только «ресурсы» рядом с exe, с проверкой пути.</summary>
+    private static void DeleteResourcesFolder()
+    {
+        var cache = Program.DataDirectory;
+        if (!Directory.Exists(cache)) return;
+        var normalizedRoot = Path.GetFullPath(Program.ApplicationDirectory).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var normalizedCache = Path.GetFullPath(cache).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        if (!string.Equals(Path.GetDirectoryName(normalizedCache), normalizedRoot, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(Path.GetFileName(normalizedCache), "ресурсы", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException($"Путь ресурсов не прошёл проверку безопасности: {normalizedCache}");
+        Directory.Delete(normalizedCache, recursive: true);
     }
 
     private static bool CanWriteToApplicationDirectory()

@@ -6,9 +6,17 @@ obj/
 
 # Published distributions and model downloads
 publish/
+publish_stress/
+publish.old/
 model-cache/
-# Local runtime data normally lives in %LocalAppData%\DSR, but ignore it if it appears here
+# Local runtime data now lives in the "ресурсы" folder next to DSR.exe (ignored with publish/)
 DSR-data/
+# Large downloaded/generated data that must not go into the repository
+dictionary/*.jsonl
+add-stress-to-epub-0.1.22/russian_text_stresser/russian_dict.db
+add-stress-to-epub-0.1.22/russian_text_stresser/simple_cases.pkl
+dsr-ruaccent-silero.json
+llmdebug.db
 
 # Python artifacts and local virtual environments
 __pycache__/

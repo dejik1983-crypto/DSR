@@ -13,8 +13,8 @@ RUAccent оставила без ударения (редкие, диалект�
                   "raw": "...", "source": "model|retry|none|form_mismatch|...", "pass": 1}],
      "stats": {...}}
 
-Знак ударения (U+0301) в ответе всегда стоит ПЕРЕД ударной гласной — так же,
-как во всём остальном файле, который создаёт конвертер.
+Знак ударения (U+0301) в ответе стоит ПОСЛЕ ударной гласной — как и во всех
+остальных файлах, которые создаёт конвертер (RUAccent, Silero, окно ручной правки).
 """
 from __future__ import annotations
 
@@ -24,6 +24,7 @@ import os
 import re
 import sys
 import time
+import unicodedata
 from pathlib import Path
 
 MARK = "\u0301"
@@ -43,6 +44,9 @@ SYSTEM_PROMPT = (
     "3. Всегда отвечай наиболее вероятным вариантом для русского литературного произношения. "
     "null допустим только если буквосочетание вообще не является русским словом.\n"
     "4. Ответ на каждый пункт — это обязательно слово из списка, а не пример оформления.\n"
+    "5. Слова пиши только кириллицей. Знак ударения — отдельный комбинируемый символ U+0301, "
+    "он идёт сразу после ударной гласной. Не используй латинские буквы и не заменяй гласные "
+    "на готовые á, ó, é, ý, à.\n"
     "Формат ответа — только JSON, как в образце."
 )
 
@@ -76,13 +80,41 @@ def clean_candidate(text: str) -> str:
     return re.sub(r"[*_`~]", "", text)
 
 
+# Слабые и бесплатные модели часто подменяют кириллические буквы похожими латинскими
+# (например «катaлoг» с латинскими a и o) или ставят вместо комбинируемого знака U+0301
+# разделительный ´ либо заранее склеенную латинскую «ó». Приводим такие ответы к обычному
+# виду «кириллица + U+0301 после ударной гласной», иначе верный ответ отбраковывается.
+_LATIN_HOMOGLYPHS = {
+    "a": "а", "c": "с", "e": "е", "o": "о", "p": "р", "x": "х", "y": "у",
+    "s": "с", "k": "к", "m": "м", "t": "т",
+    "A": "А", "C": "С", "E": "Е", "O": "О", "P": "Р", "X": "Х", "Y": "У",
+    "S": "С", "K": "К", "M": "М", "T": "Т",
+}
+_SPACING_ACUTE = {"\u00b4", "\u02b9", "\u02bc", "\u2019", "\u2032"}
+
+
+def normalize_marks(text: str) -> str:
+    """Убирает разнобой в записи ударения: разделительный ´ и латинские буквы → кириллица."""
+    out: list[str] = []
+    for ch in text:
+        if ch in _SPACING_ACUTE:
+            out.append(MARK)
+            continue
+        if ord(ch) > 0x00A0 and "LATIN" in unicodedata.name(ch, ""):
+            for part in unicodedata.normalize("NFKD", ch):
+                out.append(_LATIN_HOMOGLYPHS.get(part, part))
+            continue
+        out.append(ch)
+    return "".join(out)
+
+
 def resolve_answer(word: str, answer: object) -> tuple[int | None, str]:
     """Возвращает (индекс ударной гласной в исходном слове, причина отказа)."""
     if answer is None:
         return None, "none"
     if not isinstance(answer, str):
         return None, "badtype"
-    candidate = clean_candidate(strip_noise(answer))
+    candidate = clean_candidate(strip_noise(normalize_marks(answer)))
     if not candidate:
         return None, "empty"
     saw_word = False
@@ -299,18 +331,87 @@ class LocalBackend:
         return []
 
 
-def http_json(url: str, payload, api_key: str | None, timeout: float, method: str = "POST"):
-    """Запрос к внешнему серверу. Только стандартная библиотека: ничего доставлять не нужно."""
+# Коды, при которых имеет смысл повторить запрос: бесплатные модели внешних сервисов
+# часто отвечают «занято» (429) или отдают временный сбой шлюза.
+_RETRYABLE_HTTP = {429, 500, 502, 503, 504}
+
+# Признаки того, что повтор не поможет: исчерпан дневной лимит бесплатных моделей,
+# закончились средства или закрыт сам ключ. Такие ответы показываем сразу и понятно.
+_HARD_QUOTA_MARKERS = ("free-models-per-day", "free_tier_daily", "key_limit", "Key limit exceeded")
+
+
+def _explain_http_error(code: int, detail: str) -> str:
+    """Человеческое объяснение отказа сервиса: что именно случилось и что делать."""
+    message = ""
+    try:
+        payload = json.loads(detail) if detail.strip() else {}
+        error = payload.get("error") if isinstance(payload, dict) else None
+        if isinstance(error, dict):
+            message = str(error.get("message") or "").strip()
+        elif isinstance(error, str):
+            message = error.strip()
+    except (ValueError, TypeError):
+        message = ""
+    if not message:
+        message = (detail or "").strip().splitlines()[0] if detail.strip() else ""
+    hint = {
+        401: "Проверьте ключ API.",
+        402: "На счету внешнего сервиса нет средств.",
+        403: "Лимит ключа исчерпан или эта модель закрыта для вашего ключа.",
+        429: "Исчерпан дневной лимит бесплатных моделей — дождитесь сброса или пополните счёт сервиса.",
+    }.get(code, "")
+    parts = ["HTTP %d" % code]
+    if message:
+        parts.append(message)
+    if hint:
+        parts.append(hint)
+    return "; ".join(parts)
+
+
+def http_json(url: str, payload, api_key: str | None, timeout: float, method: str = "POST", attempts: int = 4):
+    """Запрос к внешнему серверу. Только стандартная библиотека: ничего доставлять не нужно.
+    Повторяет запрос при «сервис занят» с нарастающей паузой, чтобы бесплатный лимит не срывал проход,
+    но при жёстком лимите (день/ключ) сразу сообщает причину, не тратя время на повторы."""
+    import urllib.error
     import urllib.request
 
     body = None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    request = urllib.request.Request(url, data=body, method=method)
-    request.add_header("Content-Type", "application/json")
-    if api_key:
-        request.add_header("Authorization", "Bearer " + api_key)
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        text = response.read().decode("utf-8", "replace")
-    return json.loads(text) if text.strip() else {}
+    delay = 5.0
+    for attempt in range(1, attempts + 1):
+        request = urllib.request.Request(url, data=body, method=method)
+        request.add_header("Content-Type", "application/json")
+        if api_key:
+            request.add_header("Authorization", "Bearer " + api_key)
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                text = response.read().decode("utf-8", "replace")
+            return json.loads(text) if text.strip() else {}
+        except urllib.error.HTTPError as error:
+            try:
+                detail = error.read().decode("utf-8", "replace")
+            except Exception:  # noqa: BLE001
+                detail = ""
+            hard = error.code in (401, 402, 403) or (error.code == 429 and
+                                                     any(marker in detail for marker in _HARD_QUOTA_MARKERS))
+            if hard:
+                raise RuntimeError(_explain_http_error(error.code, detail)) from None
+            if error.code not in _RETRYABLE_HTTP or attempt >= attempts:
+                raise
+            header = (error.headers.get("Retry-After") if error.headers else "") or ""
+            try:
+                wait = max(delay, float(header))
+            except ValueError:
+                wait = delay
+            log("DSR_LLM:warning:сервис занят, код %s; повтор через %d с (попытка %d из %d)"
+                % (error.code, int(wait), attempt, attempts))
+            time.sleep(wait)
+            delay = min(delay * 2, 60)
+        except urllib.error.URLError:
+            if attempt >= attempts:
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, 60)
+    raise RuntimeError("сервис не ответил после нескольких попыток")
 
 
 class OllamaBackend:
@@ -404,6 +505,11 @@ def process_pass(backend, book, items, system_prompt, batch_size, max_new_tokens
     outcomes: dict[str, tuple[int | None, str, str | None]] = {}
     for offset in range(0, len(items), batch_size):
         batch = items[offset:offset + batch_size]
+        # Сообщаем интерфейсу, какие слова уходят в модель прямо сейчас: пары
+        # ask/answer дают живую строку «слово — думаю / результат», по которой видно,
+        # что проход не завис, даже когда партия слов считается десятки секунд.
+        for item in batch:
+            log("DSR_LLM:ask:%s:%s" % (label, item["word"]))
         user_prompt = build_user_prompt(book, batch, single)
         cap = max_new_tokens or max(160, 40 * len(batch))
         answer = ""
@@ -426,6 +532,8 @@ def process_pass(backend, book, items, system_prompt, batch_size, max_new_tokens
         for number, item in enumerate(batch, start=1):
             vowel, reason = resolve_answer(item["word"], by_index.get(number))
             outcomes[item["word"]] = (vowel, reason, by_index.get(number) if isinstance(by_index.get(number), str) else None)
+            suggestion = build_suggestion(item["word"], vowel) if vowel is not None else ""
+            log("DSR_LLM:answer:%s:%s:%s:%s" % (label, item["word"], "ok" if vowel is not None else "none", suggestion))
         done = min(offset + batch_size, len(items))
         log("DSR_LLM:progress:%s:%d/%d:%.1fs" % (label, done, len(items), time.time() - started))
     return outcomes

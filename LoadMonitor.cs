@@ -58,17 +58,21 @@ internal sealed class LoadMonitor : IDisposable
         _pythonRoot = Path.Combine(Program.DataDirectory, "python");
     }
 
-    /// <summary>Короткая строка для интерфейса: «ЦП 42 % · ОЗУ … · GPU …».</summary>
+    /// <summary>Короткая строка для интерфейса: «ЦП ПК 42 % · ОЗУ … · GPU …».</summary>
     public string Describe()
     {
-        var parts = new List<string> { "ЦП " + SystemCpuPercent().ToString("0", CultureInfo.InvariantCulture) + " %" };
+        var parts = new List<string> { "ЦП ПК " + SystemCpuPercent().ToString("0", CultureInfo.InvariantCulture) + " %" };
 
         var (workerMemory, workerCpu) = WorkerLoad();
         if (workerMemory > 0)
             parts.Add("ИИ-процесс: ЦП " + workerCpu.ToString("0", CultureInfo.InvariantCulture) + " %, ОЗУ " + Size(workerMemory));
 
         if (SystemMemoryUsed() is { } memory)
-            parts.Add("ОЗУ всего " + Size(memory.Used) + " из " + Size(memory.Total));
+        {
+            var percent = memory.Total > 0 ? memory.Used * 100.0 / memory.Total : 0;
+            parts.Add("ОЗУ занято " + Size(memory.Used) + " из " + Size(memory.Total)
+                + " (" + percent.ToString("0", CultureInfo.InvariantCulture) + " %)");
+        }
 
         var gpu = Gpu();
         if (gpu.Length > 0) parts.Add(gpu);
@@ -124,9 +128,12 @@ internal sealed class LoadMonitor : IDisposable
                 var ticks = process.TotalProcessorTime.Ticks;
                 if (_workerCpu.TryGetValue(process.Id, out var previous))
                 {
-                    var seconds = (now - previous.At).TotalMilliseconds;
-                    if (seconds > 0)
-                        cpu += 100.0 * (ticks - previous.CpuTicks) / (seconds * 1000.0 * Environment.ProcessorCount);
+                    // TotalProcessorTime — в тиках по 100 нс, а интервал берём в секундах:
+                    // приводим обе величины к одной и считаем процент от всех ядер машины.
+                    var elapsedSeconds = (now - previous.At).TotalSeconds;
+                    if (elapsedSeconds > 0)
+                        cpu += 100.0 * (ticks - previous.CpuTicks)
+                             / (elapsedSeconds * TimeSpan.TicksPerSecond * Environment.ProcessorCount);
                 }
                 _workerCpu[process.Id] = (ticks, now);
             }

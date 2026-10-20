@@ -1,0 +1,1080 @@
+from collections import defaultdict
+from dataclasses import dataclass
+import os
+from pathlib import Path
+import pstats
+import random
+import time
+from typing import Any, Union
+from russian_text_stresser.debug_helpers import (
+    esc_nl,
+    print_two_docs_with_pos_next_to_another,
+)
+from russian_text_stresser.helper_methods import load_spacy_full, load_spacy_min
+from stressed_cyrillic_tools import (
+    has_acute_accent_or_only_one_syllable,
+    remove_accent_if_only_one_syllable,
+    unaccentify,
+    remove_yo,
+    has_only_one_syllable,
+    has_cyrillic_letters,
+    is_unhelpfully_unstressed,
+)
+from russian_text_stresser.text_stresser import RussianTextStresser
+from spacy.tokens.token import Token
+from russian_stress_benchmark.benchmark import benchmark_everything_in_folder
+
+try:
+    from russtress import Accent
+except ImportError:
+    pass
+try:
+    from stressrnn.stressrnn import StressRNN
+except ImportError:
+    pass
+import csv
+from russ.stress.predictor import StressPredictor
+import cProfile
+from spacy.language import Language
+from russian_text_stresser.gpt3_WSD import WIZARD_L2_13B, LocalLLM
+
+
+def add_defaultdicts(dict1: defaultdict[Any, Any], dict2: defaultdict[Any, Any]):
+    for key in dict2:
+        dict1[key] += dict2[key]
+    return dict1
+
+
+@dataclass
+class StressMistake:
+    orig_token: str
+    auto_stressed_token: str
+    sentence: str
+    unstressed_token_with_grammar_info: Token  # This should include grammar info an
+
+
+@dataclass
+class AnalysisResults:
+    orig_doc_length: int
+    auto_stressed_doc_length: int
+    num_unstressed_tokens: int
+    num_correctly_stressed_tokens: int
+    num_incorrectly_stressed_tokens: int
+    num_correctly_stressed_by_pos: defaultdict[str, int]
+    num_unstressed_by_pos: defaultdict[str, int]
+    num_incorrectly_stressed_by_pos: defaultdict[str, int]
+    stress_mistakes: list[StressMistake]
+    unstressed_mistakes: list[StressMistake]
+    file_path: str | list[str]
+
+    def get_percentage_unstressed_tokens(self) -> float:
+        return self.num_unstressed_tokens / self.orig_doc_length * 100
+
+    def get_percentage_correctly_stressed_tokens(self) -> float:
+        return self.num_correctly_stressed_tokens / self.orig_doc_length * 100
+
+    def get_percentage_incorrectly_stressed_tokens(self) -> float:
+        return self.num_incorrectly_stressed_tokens / self.orig_doc_length * 100
+
+    def get_percentage_correctly_stressed_by_pos(self) -> dict[str, float]:
+        return {
+            pos: self.num_correctly_stressed_by_pos[pos]
+            / (
+                self.num_correctly_stressed_by_pos[pos]
+                + self.num_incorrectly_stressed_by_pos[pos]
+                + self.num_unstressed_by_pos[pos]
+            )
+            * 100
+            for pos in self.num_correctly_stressed_by_pos
+        }
+
+    def get_percentage_unstressed_by_pos(self) -> dict[str, float]:
+        return {
+            pos: self.num_unstressed_by_pos[pos]
+            / (
+                self.num_correctly_stressed_by_pos[pos]
+                + self.num_incorrectly_stressed_by_pos[pos]
+                + self.num_unstressed_by_pos[pos]
+            )
+            * 100
+            for pos in self.num_unstressed_by_pos
+        }
+
+    def get_percentage_incorrectly_stressed_by_pos(self) -> dict[str, float]:
+        return {
+            pos: self.num_incorrectly_stressed_by_pos[pos]
+            / (
+                self.num_correctly_stressed_by_pos[pos]
+                + self.num_incorrectly_stressed_by_pos[pos]
+                + self.num_unstressed_by_pos[pos]
+            )
+            * 100
+            for pos in self.num_incorrectly_stressed_by_pos
+        }
+
+    def get_all_occuring_pos(self) -> list[str]:
+        return list(self.num_correctly_stressed_by_pos.keys())
+
+    # Overload the + operator to make it easier to combine results
+
+    def __add__(self, other: "AnalysisResults"):
+        if isinstance(self.file_path, str):
+            self.file_path = [self.file_path]
+        if isinstance(other.file_path, str):
+            other.file_path = [other.file_path]
+
+        return AnalysisResults(
+            self.orig_doc_length + other.orig_doc_length,
+            self.auto_stressed_doc_length + other.auto_stressed_doc_length,
+            self.num_unstressed_tokens + other.num_unstressed_tokens,
+            self.num_correctly_stressed_tokens + other.num_correctly_stressed_tokens,
+            self.num_incorrectly_stressed_tokens
+            + other.num_incorrectly_stressed_tokens,
+            add_defaultdicts(
+                self.num_correctly_stressed_by_pos, other.num_correctly_stressed_by_pos
+            ),
+            add_defaultdicts(self.num_unstressed_by_pos, other.num_unstressed_by_pos),
+            add_defaultdicts(
+                self.num_incorrectly_stressed_by_pos,
+                other.num_incorrectly_stressed_by_pos,
+            ),
+            self.stress_mistakes + other.stress_mistakes,
+            self.unstressed_mistakes + other.unstressed_mistakes,
+            self.file_path + other.file_path,
+        )
+
+    # Returns empty AnalysisResults object
+    @staticmethod
+    def get_empty_results():
+        return AnalysisResults(
+            0,
+            0,
+            0,
+            0,
+            0,
+            defaultdict(int),
+            defaultdict(int),
+            defaultdict(int),
+            [],
+            [],
+            [],
+        )
+
+
+def token_is_unimportant(token: Token) -> bool:
+    # We don't want to count punctuation or spaces. Also we only want takens that contain at least one letter
+    return (
+        token.is_punct
+        or token.is_space
+        or not any(char.isalpha() for char in token.text)
+    )
+
+
+class AccuracyCalculator:
+    def __init__(self) -> None:
+        # self._nlp = load_spacy_min()
+        self._nlp = (
+            load_spacy_full()
+        )  # We need this because we want to collect part of speech/morphology statistics
+
+    def calc_accuracy(
+        self,
+        orig_stressed_file_path: str,
+        auto_stressed_file_path: str,
+        remov_yo: bool = False,  # I am not sure if remove_yo here makes sense
+    ) -> AnalysisResults:
+        with open(orig_stressed_file_path, "r", encoding="utf-8") as orig_file, open(
+            auto_stressed_file_path, "r", encoding="utf-8"
+        ) as auto_stressed_file:
+            orig_text = orig_file.read()
+            auto_stressed_text = remove_accent_if_only_one_syllable(
+                auto_stressed_file.read()
+            )
+            orig_text_fixed = remove_accent_if_only_one_syllable(orig_text)
+            orig_doc = self._nlp(orig_text_fixed)
+            auto_stress_doc = self._nlp(auto_stressed_text)
+            if remov_yo:
+                unstressed_text = unaccentify(remove_yo(orig_text))
+            else:
+                unstressed_text = unaccentify(orig_text)
+            unstressed_doc = self._nlp(unstressed_text)
+
+            original_no_punct_tokens = [
+                token for token in orig_doc if not token_is_unimportant(token)
+            ]
+            auto_stressed_no_punct_tokens = [
+                token for token in auto_stress_doc if not token_is_unimportant(token)
+            ]
+            unstressed_no_punct_tokens = [
+                token for token in unstressed_doc if not token_is_unimportant(token)
+            ]
+
+            num_tokens_in_original = len(original_no_punct_tokens)
+            num_tokens_in_auto_stressed = len(auto_stressed_no_punct_tokens)
+
+            stress_mistakes: list[StressMistake] = []
+            unstressed_mistakes: list[StressMistake] = []
+            correctly_stressed_by_pos_dict: defaultdict[str, int] = defaultdict(int)
+            unstressed_by_pos_dict: defaultdict[str, int] = defaultdict(int)
+            incorrectly_stressed_by_pos_dict: defaultdict[str, int] = defaultdict(int)
+
+            if num_tokens_in_auto_stressed != num_tokens_in_original:
+                print(
+                    f"{orig_stressed_file_path} and {auto_stressed_file_path} are not the same length."
+                    f"Error!\nLength of original document: {num_tokens_in_original}\nLength of automatically stressed document: {num_tokens_in_auto_stressed}"
+                )
+
+                print_two_docs_with_pos_next_to_another(  # This is super useful for debugging
+                    original_no_punct_tokens, auto_stressed_no_punct_tokens
+                )
+                raise Exception(
+                    f"{orig_stressed_file_path} and {auto_stressed_file_path} are not the same length."
+                )
+
+            num_unstressed_tokens = 0
+            num_correctly_stressed_tokens = 0
+            num_differing_tokens = 0  # This means serious problems
+
+            for orig_token, auto_stress_token, unstressed_token in zip(
+                original_no_punct_tokens,
+                auto_stressed_no_punct_tokens,
+                unstressed_no_punct_tokens,
+            ):
+                # We also use the unstressed token because spaCy has better grammar analysis for unstressed tokens
+                orig_token_text: str = orig_token.text
+                auto_stress_token_text: str = auto_stress_token.text
+                if remove_yo(unaccentify(orig_token_text)) != remove_yo(
+                    unaccentify(auto_stress_token_text)
+                ):
+                    print("Differing words:")
+                    print(orig_token.text)
+                    print(auto_stress_token.text)
+
+                    num_differing_tokens += 1
+
+                if not has_acute_accent_or_only_one_syllable(auto_stress_token_text):
+                    num_unstressed_tokens += 1
+                    unstressed_by_pos_dict[unstressed_token.pos_] += 1
+                    unstressed_mistakes.append(
+                        StressMistake(
+                            orig_token_text,
+                            auto_stress_token_text,
+                            orig_token.sent.text,
+                            unstressed_token,
+                        )
+                    )
+                else:
+                    if orig_token_text == auto_stress_token_text:
+                        num_correctly_stressed_tokens += 1
+                        correctly_stressed_by_pos_dict[unstressed_token.pos_] += 1
+                    else:
+                        incorrectly_stressed_by_pos_dict[unstressed_token.pos_] += 1
+                        stress_mistakes.append(
+                            StressMistake(
+                                orig_token_text,
+                                auto_stress_token_text,
+                                orig_token.sent.text,
+                                unstressed_token,  # We take here the unstressed doc because I doubt
+                                # that spaCy will perform correct grammar analysis for stressed texts
+                            )
+                        )
+
+            num_incorrectly_stressed_tokens = (
+                num_tokens_in_original
+                - num_correctly_stressed_tokens
+                - num_unstressed_tokens
+            )
+
+            if num_differing_tokens > 0:
+                print("Differing tokens: ", num_differing_tokens)
+                orig_filename = os.path.basename(orig_stressed_file_path)
+                auto_stressed_path_first_folder = Path(
+                    auto_stressed_file_path
+                ).parent.name
+                print_two_docs_with_pos_next_to_another(  # This is super useful for debugging
+                    original_no_punct_tokens,
+                    auto_stressed_no_punct_tokens,
+                    f"{orig_filename}_{auto_stressed_path_first_folder}.tsv",
+                )
+
+            analysis_results = AnalysisResults(
+                num_tokens_in_original,
+                num_tokens_in_auto_stressed,
+                num_unstressed_tokens,  # / num_tokens_in_original * 100,
+                num_correctly_stressed_tokens,  # / num_tokens_in_original * 100,
+                num_incorrectly_stressed_tokens,  # / num_tokens_in_original * 100,
+                correctly_stressed_by_pos_dict,
+                unstressed_by_pos_dict,
+                incorrectly_stressed_by_pos_dict,
+                stress_mistakes,
+                unstressed_mistakes,
+                orig_stressed_file_path,
+            )
+            return analysis_results
+
+    def calc_accuracy_over_dir(
+        self, original_dir_path: str, auto_stressed_dir_path: str
+    ) -> list[AnalysisResults]:
+        # Iterate over all files in the directory and subdirectories
+        results: list[AnalysisResults] = []
+        for root, dirs, files in os.walk(original_dir_path):
+            for file in files:
+                if file.endswith(".txt") or file.endswith(".ref"):
+                    original_file_path = os.path.join(root, file)
+                    relative_path = os.path.relpath(
+                        original_file_path, original_dir_path
+                    )
+                    # auto_stressed_file_path = os.path.join(auto_stressed_dir_path, file)
+                    auto_stressed_file_path = os.path.join(
+                        auto_stressed_dir_path, relative_path
+                    )
+                    results.append(
+                        self.calc_accuracy(original_file_path, auto_stressed_file_path)
+                    )
+        return results
+
+    def print_accuracy(self, original_file_path: str, auto_stressed_file_path: str) -> None:
+        analysis_res: AnalysisResults = self.calc_accuracy(original_file_path, auto_stressed_file_path)
+        print(f"Number of tokens: {analysis_res.orig_doc_length}")
+        print(
+            f"Percentage correctly stressed tokens: {analysis_res.get_percentage_correctly_stressed_tokens()}"
+        )
+        print(
+            f"Percentage unstressed tokens: {analysis_res.get_percentage_unstressed_tokens()}"
+        )
+        print(
+            f"Percentage incorrectly stressed tokens: {analysis_res.get_percentage_incorrectly_stressed_tokens()}"
+        )
+
+
+TEST_RG_TEXT = """
+– Ты, дя́дя, мно́го не спра́шивай, – улыбну́лась де́вочка. По э́той улы́бке он по́нял, что вопро́сы действи́тельно задава́ть не ну́жно. – Ты спи́чку бе́ри|бери́.
+Дя́дя закры́л глаза́ и взял чёрную спи́чку.
+"""
+
+
+def fix_russiangram_text(text: str) -> str:
+    """If russiangram is unsure or there are two options, it returns option1|option2. We always take the first one for a fair benchmark."""
+    nlp = load_spacy_min()
+
+    doc = nlp(text)
+    final_text = ""
+    for token in doc:
+        if "|" in token.text:
+            fixed_word = token.text.split("|")[0]
+            final_text += fixed_word + token.whitespace_
+        else:
+            final_text += token.text_with_ws
+    return final_text
+
+
+def fix_russiangram_folder(input_folder: str, output_folder: str) -> None:
+    """Fixes all files in a folder and its subfolders"""
+    # Iterate over all files in the folder and its subfolders
+    for root, _, files in os.walk(input_folder):
+        for file in files:
+            if file.endswith(".txt") or file.endswith(".ref"):
+                file_path = os.path.join(root, file)
+                with open(file_path, "r", encoding="utf-8") as f:
+                    text = f.read()
+                    text_fixed = fix_russiangram_text(text)
+                relative_path = os.path.relpath(file_path, input_folder)
+                output_file_path = os.path.join(output_folder, relative_path)
+                os.makedirs(os.path.dirname(output_file_path), exist_ok=True)
+                with open(output_file_path, "w", encoding="utf-8") as f:
+                    f.write(text_fixed)
+
+
+def print_statistics_over_data(folder_path: str):
+    nlp = load_spacy_full()
+
+    token_num = 0
+    # Iterate over all files in the folder and its subfolders
+    for root, _, files in os.walk(folder_path):
+        for file in files:
+            if file.endswith(".txt") or file.endswith(".ref"):
+                file_path = os.path.join(root, file)
+                with open(file_path, "r", encoding="utf-8") as f:
+                    text = f.read()
+                    doc = nlp(text)
+                    token_num += len(doc)
+
+    print(f"Number of tokens: {token_num}")
+
+
+def perform_benchmark_for_my_solution() -> None:
+    ts = RussianTextStresser()
+    base_folder = "correctness_tests"
+    orig_folder = "stressed_russian_texts"
+    result_folder = "results_my_solution"
+
+    base_path = f"{base_folder}/{orig_folder}"
+    result_path = f"{base_folder}/{result_folder}"
+
+    # Profile
+    cProfile.runctx(
+        "benchmark_everything_in_folder(base_path, result_path, ts.stress_text)",
+        globals(),
+        locals(),
+        "Profile.prof",
+    )
+
+    # Stats
+    s = pstats.Stats("Profile.prof")
+    s.strip_dirs().sort_stats("time").print_stats()
+
+    benchmark_everything_in_folder(base_path, result_path, ts.stress_text)
+
+
+def perform_benchmark_for_my_solutions_old(benchmark_yo=False) -> None:
+    old_file_paths = [
+        "russian_dict_old_downloadable.db",
+        "tempdb_0_enwiktionary_only.db",
+        "tempdb_1_with_openrussian.db",
+        "tempdb_2_with_ruwiktionary.db",
+        "tempdb_3_with_ruwikipedia.db",
+    ]
+
+    for file_path in old_file_paths:
+        if file_path != "tempdb_3_with_ruwikipedia.db":
+            simple_cases = None
+        else:
+            simple_cases = "simple_cases.pkl"
+        ts = RussianTextStresser(db_file=file_path, simple_cases_file=simple_cases)
+        base_folder = "correctness_tests"
+        orig_folder = "stressed_russian_texts"
+        result_folder = f"results_{file_path.replace('.db', '')}"
+
+        if benchmark_yo:
+            result_folder += "_noyo"
+
+        base_path = f"{base_folder}/{orig_folder}"
+        result_path = f"{base_folder}/{result_folder}"
+        t0 = time.time()
+        benchmark_everything_in_folder(
+            base_path, result_path, ts.stress_text, rmv_yo=benchmark_yo
+        )
+        print(f"Time for {file_path}: {time.time() - t0}")
+
+
+def try_to_fix_russtress_text(
+    stresser: "Accent", stressed_text: str, spacy_min: Language
+) -> str:
+    fixed_text = ""
+    # Check if there are any words that are not stressed
+    doc = spacy_min(stressed_text)
+    for token in doc:
+        # If yes: cyrillic word is unstressed! -> Problem
+        if (
+            has_cyrillic_letters(token.text)
+            and not has_acute_accent_or_only_one_syllable(token.text)
+            and not "ё" in token.text
+            and not "Ё" in token.text
+            and token.i != 0
+            and token.nbor(-1).text != "-"
+        ):
+            print("Unstressed word found: ", token.text)
+            print(
+                "Retrying a text of the following length: ",
+                len(doc[token.i :].text_with_ws),
+            )
+            # Get all text after the current token
+            text_to_retry = unaccentify(doc[token.i :].text_with_ws)
+            # Stress it
+            stressed_text_to_retry = stresser.put_stress(text_to_retry).replace(
+                "'", "\u0301"
+            )
+            # Replace the old text with the new text
+            # However, we need to check again
+            return fixed_text + try_to_fix_russtress_text(
+                stresser, stressed_text_to_retry, spacy_min
+            )
+        else:
+            fixed_text += token.text_with_ws
+    return fixed_text
+
+
+def stress_text_with_russtress(
+    text: str, stresser: Union["Accent", "StressRNN"], try_to_fix: bool=True
+):
+    if isinstance(stresser, StressRNN): # type: ignore
+        stressed_text = stresser.put_stress(text, stress_symbol="'").replace(
+            "'", "\u0301"
+        )
+    else:
+        stressed_text = stresser.put_stress(text).replace("'", "\u0301")
+    if try_to_fix and isinstance(stresser, Accent): # type: ignore
+        nlp = load_spacy_min()
+        nlp.add_pipe("sentencizer")
+        # stressed_text = try_to_fix_russtress_text(stresser, stressed_text, nlp)
+        doc = nlp(stressed_text)
+        fixed_text = ""
+        for sent in doc.sents:
+            fixed_text += try_to_fix_russtress_text(stresser, sent.text_with_ws, nlp) # type: ignore
+        return fixed_text
+    return stressed_text
+
+
+def perform_benchmark_for_russtress(try_to_fix: bool =True) -> None:
+    stresser = Accent() # type: ignore
+    base_folder = "correctness_tests"
+    orig_folder = "stressed_russian_texts"
+    result_folder = "results_russtress"
+
+    if try_to_fix:
+        result_folder += "_fixed"
+
+    base_path = f"{base_folder}/{orig_folder}"
+    result_path = f"{base_folder}/{result_folder}"
+
+    def stress_text(text: str) -> str:
+        return stress_text_with_russtress(text, stresser, try_to_fix)
+
+    benchmark_everything_in_folder(base_path, result_path, stress_text)
+
+
+def perform_benchmark_for_stressrnn() -> None:
+    stresser = StressRNN() # type: ignore
+    base_folder = "correctness_tests"
+    orig_folder = "stressed_russian_texts"
+    result_folder = "results_stressrnn"
+
+    base_path = f"{base_folder}/{orig_folder}"
+    result_path = f"{base_folder}/{result_folder}"
+
+    def stress_text(text: str) -> str:
+        return stress_text_with_russtress(text, stresser, try_to_fix=False)
+
+    benchmark_everything_in_folder(base_path, result_path, stress_text)
+
+
+class RandomStresser:
+    """Stresses texts randomly. Used for benchmarking."""
+
+    def __init__(self) -> None:
+        self._nlp = load_spacy_min()
+
+    def stress_text(self, text: str) -> str:
+        doc = self._nlp(text)
+        final_text = ""
+        for token in doc:
+            final_text += self.stress_word_randomly(token.text) + token.whitespace_
+        return final_text
+
+    def stress_word_randomly(self, word: str) -> str:
+        if has_only_one_syllable(word):
+            return word
+        else:
+            # calculate the vowel indexes (аоэуыяеёюи)
+            indexes: list[int] = []
+            for i, char in enumerate(word):
+                if char.lower() in "аоэуыяеёюи":
+                    indexes.append(i)
+            if len(indexes) == 0:
+                return word
+            # choose a random vowel index
+            stressed_index = random.choice(indexes)
+            word_until_stressed = word[: stressed_index + 1]
+            word_after_stressed = word[stressed_index + 1 :]
+            # add the stress mark
+            stressed_word = word_until_stressed + "\u0301" + word_after_stressed
+            return stressed_word
+
+
+def perform_benchmark_random():
+    rs = RandomStresser()
+    base_folder = "correctness_tests"
+    orig_folder = "stressed_russian_texts"
+    result_folder = "results_random"
+
+    base_path = f"{base_folder}/{orig_folder}"
+    result_path = f"{base_folder}/{result_folder}"
+
+    benchmark_everything_in_folder(base_path, result_path, rs.stress_text)
+
+
+def perform_benchmark_for_russ():
+    model = StressPredictor()
+
+    nlp = load_spacy_min()
+    base_folder = "correctness_tests"
+    orig_folder = "stressed_russian_texts"
+    result_folder = "results_russ"
+
+    base_path = f"{base_folder}/{orig_folder}"
+    result_path = f"{base_folder}/{result_folder}"
+
+    def stress_word(word: str):
+        if has_only_one_syllable(word):
+            return word
+        else:
+            stressed_index = model.predict(word)
+            word_until_stressed = word[: stressed_index[-1] + 1]
+            word_after_stressed = word[stressed_index[-1] + 1 :]
+            # add the stress mark
+            stressed_word = word_until_stressed + "\u0301" + word_after_stressed
+            return stressed_word
+
+    def stress_text(word: str) -> str:
+        doc = nlp(word)
+        final_text = ""
+        for token in doc:
+            final_text += stress_word(token.text) + token.whitespace_
+        return final_text
+
+    benchmark_everything_in_folder(base_path, result_path, stress_text)
+
+
+def print_stressmistake_to_tsv(mistakes: list[StressMistake], tsv_path: str) -> None:
+    """Prints a histogram of stress mistakes to a TSV file."""
+    # The TSV will have the rows in the following order:
+    # * The word
+    # * The part of speech
+    # * The morphological features
+    # * The correct stress
+    # * The incorrect stress
+    # * The number of times the mistake was made
+
+    with open(tsv_path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f, delimiter="\t")
+
+        mistakes_by_token = defaultdict(list)
+        for mistake in mistakes:
+            mistakes_by_token[
+                (
+                    mistake.orig_token,
+                    mistake.unstressed_token_with_grammar_info.pos_,
+                    mistake.auto_stressed_token,
+                )
+            ].append(mistake)
+
+        # Sort the mistakes by the number of times they were made
+        mistakes_by_token = sorted(
+            mistakes_by_token.items(), key=lambda x: len(x[1]), reverse=True
+        )
+
+        writer.writerow(
+            [
+                "Word",
+                "POS",
+                "Auto-stressed word",
+                "Example sentence" "Number of mistakes",
+            ]
+        )
+
+        for (orig_token, pos, auto_stressed_token), mistakes in mistakes_by_token:
+            # Print to the TSV
+            writer.writerow(
+                [
+                    orig_token,
+                    pos,
+                    auto_stressed_token,
+                    esc_nl(mistakes[0].unstressed_token_with_grammar_info.sent.text),
+                    len(mistakes),
+                ]
+            )
+
+
+def get_all_pos(
+    stressed_text_path: str="correctness_tests/stressed_russian_texts",
+) -> list[str]:
+    """Gets all the POS tags in the corpus."""
+    nlp = load_spacy_full()
+    all_pos: set[str] = set()
+    for root, _, files in os.walk(stressed_text_path):
+        for file in files:
+            if file.endswith(".txt") or file.endswith(".ref"):
+                file_path = os.path.join(root, file)
+                with open(file_path, "r", encoding="utf-8") as f:
+                    text = unaccentify(f.read())
+                    doc = nlp(text)
+                    for token in doc:
+                        if not token_is_unimportant(token):
+                            all_pos.add(token.pos_)
+    return list(all_pos)
+
+
+def print_benchmark_result_tsv() -> None:
+    BASE_PATH = "correctness_tests"
+    BENCHMARKED_SYSTEMS_PATHS: list[str] = [
+        "results_reynolds",
+        "results_my_solution",
+        "results_russtress",
+        "results_russtress_fixed",
+        "results_random",
+        "results_russiangram_with_yo_fixed",
+        "results_russ",
+        "results_russian_dict_old_downloadable",
+        "results_tempdb_0_enwiktionary_only",
+        "results_tempdb_1_with_openrussian",
+        "results_tempdb_2_with_ruwiktionary",
+        "results_tempdb_3_with_ruwikipedia",
+        "results_my_plus_russtress",
+        "results_my_wsd",
+        "results_my_wsd_plus_russtress_fixed",
+        "results_tempdb_3_with_ruwikipedia_noyo",
+        "results_reynolds_noyo",
+        "results_russiangram_without_yo_fixed",
+        "results_stressrnn",
+    ]
+    ALL_POS = get_all_pos()
+    ALL_POS.sort()
+
+    ac = AccuracyCalculator()
+
+    with open(
+        f"{BASE_PATH}/benchmark_results.tsv", "w", encoding="utf-8", newline=""
+    ) as f:
+        writer = csv.writer(f, delimiter="\t")
+        writer.writerow(
+            [
+                "System",
+                "Percentage correct words",
+                "Percentage unstressed words",
+                "Percentage incorrect words",
+                "Number of correct words",
+                "Number of unstressed words",
+                "Number of incorrect words",
+                *["Correct: " + pos for pos in ALL_POS],
+                *["Unstressed: " + pos for pos in ALL_POS],
+                *["Incorrect: " + pos for pos in ALL_POS],
+            ]
+        )
+
+        for benchmarked_system_path in BENCHMARKED_SYSTEMS_PATHS:
+            print(f"Benchmarking {benchmarked_system_path}...")
+            # Get the name of the benchmarked system (delete results_ from the beginning)
+            system_name = benchmarked_system_path[8:]
+            # Get the statistics
+            res = ac.calc_accuracy_over_dir(
+                "correctness_tests/stressed_russian_texts",
+                f"{BASE_PATH}/{benchmarked_system_path}",
+            )
+            total_result = sum(res, AnalysisResults.get_empty_results())
+
+            cor = total_result.get_percentage_correctly_stressed_tokens()
+            uns = total_result.get_percentage_unstressed_tokens()
+            inc = total_result.get_percentage_incorrectly_stressed_tokens()
+
+            # Sort the POS results by ALL_POS
+            correct_pos_results = sorted(
+                total_result.get_percentage_correctly_stressed_by_pos().items(),
+                key=lambda x: ALL_POS.index(x[0]),
+            )
+            unstressed_pos_results = sorted(
+                total_result.get_percentage_unstressed_by_pos().items(),
+                key=lambda x: ALL_POS.index(x[0]),
+            )
+            incorrect_pos_results = sorted(
+                total_result.get_percentage_incorrectly_stressed_by_pos().items(),
+                key=lambda x: ALL_POS.index(x[0]),
+            )
+
+            # Print to the TSV
+            writer.writerow(
+                [
+                    system_name,
+                    cor,
+                    uns,
+                    inc,
+                    total_result.num_correctly_stressed_tokens,
+                    total_result.num_unstressed_tokens,
+                    total_result.num_incorrectly_stressed_tokens,
+                    *[x[1] for x in correct_pos_results],
+                    *[x[1] for x in unstressed_pos_results],
+                    *[x[1] for x in incorrect_pos_results],
+                ]
+            )
+
+
+def perform_chatgpt_mini_benchmark():
+    # Import the pandas module
+    import pandas as pd
+
+    # Create an instance of the AccuracyCalculator class
+    ac = AccuracyCalculator()
+
+    # Define a list of methods to compare
+    methods = [
+        "ChatGPT",
+        "My solution",
+        "Random",
+        "Russtress",
+        "RussianGram",
+        "Russ",
+        "Reynolds",
+    ]
+
+    # Define a list of file paths for the input and output files
+    input_file = r"correctness_tests\stressed_russian_texts\commercial\devochka.txt"
+    output_files = [
+        r"correctness_tests\results_chatgpt\commercial\devochka.txt",
+        r"correctness_tests\results_tempdb_3_with_ruwikipedia\commercial\devochka.txt",
+        r"correctness_tests\results_random\commercial\devochka.txt",
+        r"correctness_tests\results_russtress\commercial\devochka.txt",
+        r"correctness_tests\results_russiangram_with_yo_fixed\commercial\devochka.txt",
+        r"correctness_tests\results_russ\commercial\devochka.txt",
+        r"correctness_tests\results_reynolds\commercial\devochka.txt",
+    ]
+
+    # Create an empty dictionary to store the results
+    results = {}
+
+    # Loop through the methods and output files
+    for method, output_file in zip(methods, output_files):
+        # Calculate the accuracy for each method
+        res = ac.calc_accuracy(input_file, output_file)
+
+        # Add the method name and the percentage of correctly stressed tokens to the results dictionary
+        results[method] = [
+            res.get_percentage_correctly_stressed_tokens(),
+            res.get_percentage_unstressed_tokens(),
+            res.get_percentage_incorrectly_stressed_tokens(),
+        ]
+
+    # Convert the results dictionary to a pandas DataFrame
+    df = pd.DataFrame.from_dict(
+        results,
+        orient="index",
+        columns=[
+            "Percentage of correctly stressed tokens",
+            "Percentage of unstressed tokens",
+            "Percentage of incorrectly stressed tokens",
+        ],
+    )
+
+    # Define the name of the tsv file to write the results
+    tsv_file = r"correctness_tests\chatgpt_minibenchmark.tsv"
+
+    # Write the DataFrame to the tsv file with tab as the separator
+    df.to_csv(tsv_file, sep="\t", index_label="System")
+
+    # Print a message to indicate that the tsv file has been created
+    print(f"Results written to {tsv_file}")
+
+
+def stress_with_my_solution_and_russtress_fixed(text: str) -> str:
+    """Stresses a text with my solution and russtress fixed."""
+    # Stress with my solution
+    my_stresser = RussianTextStresser()
+    my_stressed_text = my_stresser.stress_text(text)
+    # Stress with russtress-fixed
+    stresser = Accent()
+    russtress_result = stress_text_with_russtress(text, stresser, try_to_fix=True)
+    my_text_tokenized = my_stresser._nlp(my_stressed_text)
+    russtress_text_tokenized = my_stresser._nlp(russtress_result)
+    # Iterate over both texts in parallel
+    final_text = ""
+    # Throw error if number of tokens is not the same
+    if len(my_text_tokenized) != len(russtress_text_tokenized):
+        raise Exception(
+            f"Number of tokens in my solution and russtress-fixed differ: {len(my_text_tokenized)} vs {len(russtress_text_tokenized)}"
+        )
+    for my_token, russtress_token in zip(my_text_tokenized, russtress_text_tokenized):
+        if is_unhelpfully_unstressed(my_token.text):
+            final_text += russtress_token.text_with_ws
+        else:
+            final_text += my_token.text_with_ws
+
+    return final_text
+
+
+def perform_benchmark_for_my_solution_plus_russtress():
+    base_folder = "correctness_tests"
+    orig_folder = "stressed_russian_texts"
+    result_folder = "results_my_plus_russtress"
+
+    base_path = f"{base_folder}/{orig_folder}"
+    result_path = f"{base_folder}/{result_folder}"
+
+    benchmark_everything_in_folder(
+        base_path, result_path, stress_with_my_solution_and_russtress_fixed
+    )
+
+
+def perform_benchmark_my_solution_wsd():
+    base_folder = "correctness_tests"
+    orig_folder = "stressed_russian_texts"
+    result_folder = "results_my_wsd"
+
+    base_path = f"{base_folder}/{orig_folder}"
+    result_path = f"{base_folder}/{result_folder}"
+    t0 = time.time()
+
+    rts = RussianTextStresser(llm=LocalLLM(WIZARD_L2_13B))
+
+    def stress_with_my_solution_wsd(text: str) -> str:
+        return rts.stress_text(text)
+
+    benchmark_everything_in_folder(base_path, result_path, stress_with_my_solution_wsd)
+    from datetime import timedelta
+
+    print(f"Time for my solution with WSD: {timedelta(seconds=time.time() - t0)}")
+
+
+def fusion_my_solution_wsd_results_with_russtress_fixed():
+    root_folder_1 = "correctness_tests/results_my_wsd"
+    output_folder = "correctness_tests/results_my_wsd_plus_russtress_fixed"
+
+    nlp = load_spacy_min()
+
+    for root, _, files in os.walk(root_folder_1):
+        for file in files:
+            if file.endswith(".txt") or file.endswith(".ref"):
+                # Open file
+                with open(os.path.join(root, file), "r", encoding="utf-8") as f:
+                    path = Path(root)
+                    # split the path into its components
+                    path_components = path.parts
+                    first_component, _, second_component = path_components
+
+                    # create a new path
+                    new_path = Path(
+                        *(
+                            first_component,
+                            "results_russtress_fixed",
+                            second_component,
+                            file,
+                        )
+                    )
+                    with open(new_path, "r", encoding="utf-8") as f2:
+                        relative_path = os.path.relpath(root, root_folder_1)
+
+                        my_text_tokenized = nlp(f.read())
+                        russtress_text_tokenized = nlp(f2.read())
+                        # Iterate over both texts in parallel
+                        final_text = ""
+                        # Throw error if number of tokens is not the same
+                        if len(my_text_tokenized) != len(russtress_text_tokenized):
+                            raise Exception(
+                                f"Number of tokens in my solution and russtress-fixed differ: {len(my_text_tokenized)} vs {len(russtress_text_tokenized)}"
+                            )
+                        for my_token, russtress_token in zip(
+                            my_text_tokenized, russtress_text_tokenized
+                        ):
+                            if is_unhelpfully_unstressed(my_token.text):
+                                final_text += russtress_token.text_with_ws
+                            else:
+                                final_text += my_token.text_with_ws
+
+                        # print(relative_path)
+
+                        # stressed_text = stress_function(text)
+                        output_path = os.path.join(output_folder, relative_path, file)
+                        # Create output path if it doesn't exist
+                        if not os.path.exists(os.path.dirname(output_path)):
+                            os.makedirs(os.path.dirname(output_path))
+                        # Write result to output file
+                        with open(output_path, "w", encoding="utf-8") as f:
+                            f.write(final_text)
+
+
+def create_unstressed_text_folder(remove_yo: bool=False):
+    base_folder = "correctness_tests"
+    orig_folder = "stressed_russian_texts"
+    result_folder = "unstressed_texts"
+
+    if remove_yo:
+        result_folder += "_NOYO"
+
+    base_path = f"{base_folder}/{orig_folder}"
+    result_path = f"{base_folder}/{result_folder}"
+
+    benchmark_everything_in_folder(base_path, result_path, lambda x: x, remove_yo)
+
+
+if __name__ == "__main__":
+    # srnn = StressRNN()
+    #
+    # print(srnn.put_stress("Я только хочу это попробовать.", stress_symbol="'"))
+
+    perform_benchmark_for_stressrnn()
+
+    # perform_benchmark_for_my_solutions_old(benchmark_yo=True)
+    #
+    # quit()
+
+    # fix_russiangram_folder(
+    #    "correctness_tests/results_russiangram_without_yo",
+    #    "correctness_tests/results_russiangram_without_yo_fixed",
+    # )
+
+    # quit()
+
+    # fusion_my_solution_wsd_results_with_russtress_fixed()
+    # quit()
+
+    # perform_benchmark_my_solution_wsd()
+    # quit()
+    # perform_benchmark_for_my_solution_plus_russtress()
+    # print(stress_with_my_solution_and_russtress_fixed("Я только хочу это попробовать."))
+    # perform_benchmark_for_russtress(try_to_fix=True)
+
+    # perform_chatgpt_mini_benchmark()
+    # quit()
+
+    print_benchmark_result_tsv()
+
+    quit()
+
+    ac = AccuracyCalculator()
+    analysisresults = ac.calc_accuracy_over_dir(
+        "correctness_tests/stressed_russian_texts",
+        "correctness_tests/results_tempdb_3_with_ruwikipedia",
+    )
+    sum_results = sum(analysisresults, AnalysisResults.get_empty_results())
+    total_tokens = (
+        sum_results.num_incorrectly_stressed_tokens
+        + sum_results.num_correctly_stressed_tokens
+        + sum_results.num_unstressed_tokens
+    )
+    print(f"Total tokens: {total_tokens}")
+
+    quit()
+
+    # Print mistakes
+    # print_stressmistake_to_tsv(
+    #    sum_results.stress_mistakes, "my_solution_stress_mistakes.tsv"
+    # )
+    # print_stressmistake_to_tsv(
+    #    sum_results.unstressed_mistakes, "my_solution_unstressed_mistakes.tsv"
+    # )
+    # Print benchmark results
+
+    # perform_benchmark_for_my_solution()
+    # quit()
+    # print(get_all_pos())
+    # quit()
+    # sp = StressPredictor()
+    # res = sp.predict("ты")
+    # print(res)
+    #
+    # quit()
+    # print(RandomStresser().stress_text("когда"))
+    # print(RandomStresser().stress_text("Привет, как дела?"))
+    # quit()
+
+    # print_benchmark_result_tsv()
+    # quit()
+    # perform_benchmark_for_russ()
+    #
+    # quit()
+    #
+    # perform_benchmark_random()
+    perform_benchmark_for_my_solutions_old()
+    #
+    print_benchmark_result_tsv()
+
+    # perform_benchmark_for_my_solution()
+
+    # fix_russiangram_folder(
+    #    "correctness_tests/results_russiangram_with_yo",
+    #    "correctness_tests/results_russiangram_with_yo_fixed",
+    # )
+
+    # perform_benchmark_for_russtress()
+
+    # print_statistics_over_data("correctness_tests/stressed_russian_texts")
+    # quit()
+
+    quit()

@@ -1,6 +1,9 @@
 @echo off
 setlocal EnableExtensions
+chcp 65001 >nul
 cd /d "%~dp0"
+rem Позволяет вызывающему скрипту отключить паузу при ошибке (полная сборка).
+if /I "%~1"=="--no-pause" set "DSR_NO_PAUSE=1"
 echo Building and publishing DSR from:
 echo   %CD%
 echo.
@@ -77,11 +80,8 @@ if not exist "%PUBLISH_DIR%\DSR.exe" (
     set "RESULT=5"
     goto :finish
 )
-if not exist "%PUBLISH_DIR%\dictionary\*.txt" (
-    echo ERROR: publish output is missing dictionary text files.
-    set "RESULT=11"
-    goto :finish
-)
+rem Словари и движок add-stress теперь встроены в DSR.exe: рядом с exe их быть не должно.
+rem Так один файл DSR.exe можно перенести на другую машину без папки dictionary.
 
 echo.
 echo Published executable:
@@ -113,7 +113,11 @@ if exist "%OLD_PUBLISH%" (
     if not exist "%PUBLISH_DIR%" mkdir "%PUBLISH_DIR%"
     if exist "%PUBLISH_DIR%\.restore-ok" del "%PUBLISH_DIR%\.restore-ok"
     for /d %%D in ("%OLD_PUBLISH%\*") do (
-        if not exist "%PUBLISH_DIR%\%%~nxD" (
+        if /I "%%~nxD"=="dictionary" (
+            rem Словари теперь встроены в DSR.exe — внешняя папка не нужна.
+        ) else if /I "%%~nxD"=="russian_text_stresser" (
+            rem Движок add-stress теперь встроен в DSR.exe и распаковывается в ресурсы.
+        ) else if not exist "%PUBLISH_DIR%\%%~nxD" (
             move "%%D" "%PUBLISH_DIR%\" >nul 2>nul
             if errorlevel 1 echo failed>>"%PUBLISH_DIR%\.restore-ok"
         )
@@ -131,9 +135,17 @@ if exist "%OLD_PUBLISH%" (
     )
 )
 
+rem Ensure the optional add-stress engine is present (used by the anchor worker).
+rem It is embedded in DSR.exe (see FB2AccentConverter.csproj) and unpacked into
+rem ресурсы\add-stress on first use, so the publish folder stays a single exe.
+
 :finish
 echo.
-if not "%RESULT%"=="0" echo Build or publish failed with exit code %RESULT%.
-if "%RESULT%"=="0" echo Build and publish completed successfully.
-pause
+if not "%RESULT%"=="0" (
+    echo Build or publish failed with exit code %RESULT%.
+    if not defined DSR_NO_PAUSE pause
+) else (
+    echo Build and publish completed successfully.
+    echo Published executable: %PUBLISH_DIR%\DSR.exe
+)
 exit /b %RESULT%

@@ -11,8 +11,8 @@ namespace FB2AccentConverter;
 /// Нужна, чтобы не нажимать «Подготовка к работе» и «Проверить GPU / CUDA» вручную
 /// при каждом запуске. Подготовка проходит сама, когда: это первый запуск, приложение
 /// перенесли в другое место, компьютер изменился, вышла новая версия DSR или выбрана
-/// другая модель обработки. Окружение Python создаётся из системного Python, поэтому
-/// перенос на другой компьютер действительно требует новой подготовки.
+/// другая модель обработки. Окружение Python создаётся из системного Python или из
+/// переносимого CPython, поэтому перенос на другой компьютер требует новой подготовки.
 /// </summary>
 internal sealed class PreparationStamp
 {
@@ -65,7 +65,8 @@ internal sealed class PreparationStamp
         && string.Equals(ResourcesPath, Fingerprint_ResourcesPath(), StringComparison.OrdinalIgnoreCase)
         && Machine == Fingerprint_Machine()
         && Model == model
-        && File.Exists(Program.EnvironmentPythonPath);
+        && File.Exists(Program.EnvironmentPythonPath)
+        && Program.IsModelPrepared(model);
 
     public static PreparationStamp Create(string model, string device, string gpu) => new()
     {

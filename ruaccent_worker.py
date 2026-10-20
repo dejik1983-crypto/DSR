@@ -10,6 +10,7 @@ import warnings
 import contextlib
 import gzip
 import io
+import shutil
 from concurrent.futures import ThreadPoolExecutor
 # Keep third-party initialization warnings and native-library notices out of
 # stdout: stdout is the machine-readable JSON/JSON-lines protocol for DSR.
@@ -172,6 +173,43 @@ def report_model_progress(model_name: str, file_name: str, downloaded: int, tota
     size = lambda value: f"{value / 1024 / 1024:.1f} МБ"
     print(f"DSR_PROGRESS:Загрузка модели {model_name}: {file_name} — {size(downloaded)} / {size(total)} ({percent}%)",
           file=sys.stderr, flush=True)
+
+
+def repair_incomplete_model(model_name: str) -> None:
+    """Удаляет каталоги моделей, в которых нет model.onnx.
+
+    RUAccent проверяет только существование каталога и после этого не пытается
+    скачать модель заново. Если загрузка оборвалась (перенос на другую машину,
+    обрыв сети), остаётся пустой/неполный каталог, и загрузка падает с
+    «model.onnx: File doesn't exist». Удаляем такие каталоги перед повтором.
+    """
+    try:
+        spec = importlib.util.find_spec("ruaccent")
+        if spec is None or spec.origin is None:
+            return
+        package = pathlib.Path(spec.origin).resolve().parent
+        checks = (
+            package / "nn" / "nn_accent",
+            package / "nn" / "nn_yo_homograph_resolver",
+            package / "nn" / "nn_omograph" / model_name,
+        )
+        for directory in checks:
+            if not directory.is_dir():
+                continue
+            has_model = (directory / "model.onnx").is_file()
+            has_tokenizer = (directory / "tokenizer.json").is_file() or (directory / "vocab.txt").is_file()
+            if has_model and has_tokenizer:
+                continue
+            shutil.rmtree(directory, ignore_errors=True)
+            _emit(f"DSR_PROGRESS:Убираю недокачанный каталог модели {directory.name}…")
+
+        dictionaries = package / "dictionary"
+        required = ("omographs.json.gz", "yo_words.json.gz", "accents_nn.json.gz")
+        if dictionaries.is_dir() and any(not (dictionaries / name).is_file() for name in required):
+            shutil.rmtree(dictionaries, ignore_errors=True)
+            _emit("DSR_PROGRESS:Убираю недокачанный каталог словарей RUAccent…")
+    except Exception as error:
+        _emit(f"DSR_PROGRESS:Не удалось проверить целостность модели: {error}")
 
 
 def install_download_progress(model_name: str) -> None:
@@ -645,7 +683,7 @@ def process_item(accentizer, item):
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", default="turbo3.1")
+    parser.add_argument("--model", default="big_poetry")
     parser.add_argument("--device", choices=("CPU", "CUDA"), default="CPU")
     parser.add_argument("--probe-gpu", action="store_true")
     dictionary_group = parser.add_mutually_exclusive_group()
@@ -677,16 +715,55 @@ def main() -> int:
         install_download_progress(args.model)
         # RUAccent's rule engine has an unavailable CRF asset in this release.
         # Its neural ONNX models still provide accents, омographs and ё handling.
+        # Полный набор опций (stress_usage_predictor + rule_engine) доступен только
+        # если соответствующие файлы реально скачаны. Иначе откатываемся в tiny_mode,
+        # чтобы подготовка/работа не падали из-за недокачанных компонентов.
+        _stress_usage_path = pathlib.Path(importlib.util.find_spec("ruaccent").origin).resolve().parent / "nn" / "nn_stress_usage_predictor" / "model.onnx"
+        _rule_engine_path = pathlib.Path(importlib.util.find_spec("ruaccent").origin).resolve().parent / "dictionary" / "rule_engine"
+        _full_options_available = _stress_usage_path.is_file() and _rule_engine_path.is_dir()
+        if not _full_options_available:
+            print("DSR_WARN:полный набор опций недоступен (stress_usage_predictor/rule_engine не найдены); используется tiny_mode.", file=sys.stderr, flush=True)
         accentizer = RUAccent()
-        accentizer.load(
-            omograph_model_size=args.model,
-            use_dictionary=args.dictionary,
-            device=args.device,
-            tiny_mode=True,
-        )
-        configure_onnx_tokenizer_inputs(accentizer)
-        configure_onnx_performance(accentizer, args.model)
-        verify_required_models(accentizer)
+        _load_error = None
+        for _attempt in range(1, 4):
+            try:
+                repair_incomplete_model(args.model)
+                accentizer = RUAccent()
+                try:
+                    accentizer.load(
+                        omograph_model_size=args.model,
+                        use_dictionary=args.dictionary,
+                        device=args.device,
+                        tiny_mode=not _full_options_available,
+                    )
+                except Exception as exc:
+                    print(f"DSR_WARN:полный набор опций не загрузился ({exc}); повтор с tiny_mode.", file=sys.stderr, flush=True)
+                    accentizer = RUAccent()
+                    accentizer.load(
+                        omograph_model_size=args.model,
+                        use_dictionary=args.dictionary,
+                        device=args.device,
+                        tiny_mode=True,
+                    )
+                configure_onnx_tokenizer_inputs(accentizer)
+                configure_onnx_performance(accentizer, args.model)
+                verify_required_models(accentizer)
+                _load_error = None
+                break
+            except Exception as exc:
+                _load_error = exc
+                repair_incomplete_model(args.model)
+                if _attempt >= 3:
+                    break
+                print(
+                    f"DSR_PROGRESS:Модель {args.model} не загрузилась (попытка {_attempt} из 3). "
+                    f"Убираю недокачанные файлы и повторяю…",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                time.sleep(2 * _attempt)
+        if _load_error is not None:
+            raise _load_error
         install_accent_cache(accentizer)
         install_batched_pipeline(accentizer)
         if args.device == "CUDA":

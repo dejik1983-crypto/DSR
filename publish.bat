@@ -25,4 +25,4 @@ for %%F in ("%PUBLISH_DIR%\*") do if /I not "%%~nxF"=="DSR.exe" del /q "%%F"
 echo.
 echo Ready to copy: %PUBLISH_DIR%\DSR.exe
 for %%F in ("%PUBLISH_DIR%\DSR.exe") do echo Size: %%~zF bytes
-echo Everything else (Python environment, models, scripts, caches) is created on first run in %%LocalAppData%%\DSR.
+echo Everything else (Python environment, models, dictionaries, caches) is created on first run in the "ресурсы" folder next to DSR.exe.
