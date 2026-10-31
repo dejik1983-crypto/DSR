@@ -17,6 +17,7 @@ import os
 import re
 import sys
 import traceback
+from typing import Optional
 
 # Keep a private handle to the real protocol channel before anybody (including
 # imported libraries) can write stray text to it.
@@ -151,8 +152,6 @@ def _idiom_override(word: str) -> Optional[str]:
     if plain in {form for pair in IDIOMS for form in pair}:
         return "".join(ch for ch in word if ch != ACCENT)
     return None
-
-ACCENT = "\u0301"
 
 
 def _respond(payload) -> None:

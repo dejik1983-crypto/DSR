@@ -1,10 +1,17 @@
 <Project>
-  <!-- Объекты сборки пробника держим вне папки _diag: иначе основной проект при
-       dotnet build находит второй AssemblyInfo.cs и падает с CS0579. Путь задаётся
-       здесь, а не в IdiomProbe.csproj: MSBuild меняет свойство слишком поздно и ругается
-       предупреждением MSB3539. -->
-  <PropertyGroup>
-    <BaseIntermediateOutputPath>$(MSBuildThisFileDirectory)..\_diag-obj\IdiomProbe\obj\</BaseIntermediateOutputPath>
-    <BaseOutputPath>$(MSBuildThisFileDirectory)..\_diag-obj\IdiomProbe\bin\</BaseOutputPath>
-  </PropertyGroup>
+  <!-- Пробник (IdiomProbe.csproj) лежит внутри папки основного проекта. Его obj/*.cs
+       (AssemblyInfo, GlobalUsings и т.п.) при пересборке основного проекта попадают в
+       компиляцию и дают CS0579 «Повторяющийся атрибут», а top-level Program.cs пробника
+       вдобавок становится «глобальным кодом» (warning CS7022 — точка входа ДСР теряется).
+
+       Поэтому запуск пробника — с явным путём к объектам ВНЕ проекта (см. README рядом):
+
+         cd _diag
+         dotnet run -p:BaseIntermediateOutputPath=..\_diag-obj\obj\ `
+                    -p:BaseOutputPath=..\_diag-obj\bin\
+
+       а после прогона _diag-obj удаляется. Надёжнее — запускать пробник в отдельной
+       копии проекта (git worktree / копия папки), тогда папка _diag в ней чистая.
+       Здесь свойств нет намеренно: BaseIntermediateOutputPath из props применяется
+       слишком поздно и не выносит объекты, а показывает ложное сообщение об успехе. -->
 </Project>
