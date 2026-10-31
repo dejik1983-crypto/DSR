@@ -24,6 +24,12 @@
   <ItemGroup>
     <Compile Remove="publish\**\*.cs" />
     <Page Remove="publish\**\*.xaml" />
+    <!-- _diag — отдельные проверочные программы (см. _diag\IdiomProbe.csproj). Они не часть
+         DSR: без этих строк их *.cs попадают в компиляцию как «глобальный код», и сборка
+         выдаёт CS7022 — точка входа DSR игнорируется, запускаться будет пробник. -->
+    <Compile Remove="_diag\**\*.cs" />
+    <Page Remove="_diag\**\*.xaml" />
+    <None Include="_diag\**\*" />
     <EmbeddedResource Include="ruaccent_worker.py" LogicalName="DSR.ruaccent_worker.py" />
     <EmbeddedResource Include="llm_stress_worker.py" LogicalName="DSR.llm_stress_worker.py" />
     <EmbeddedResource Include="silero_stress_worker.py" LogicalName="DSR.silero_stress_worker.py" />

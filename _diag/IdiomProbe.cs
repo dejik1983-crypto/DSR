@@ -5,9 +5,8 @@
 //   dotnet run                 (возьмёт bin\Debug основного проекта)
 //   dotnet run -- <путь к DSR.dll>
 //
-// Объекты сборки уходят в _diag-obj (см. Directory.Build.props рядом): если оставить
-// их в _diag, основной проект при dotnet build видит второй AssemblyInfo.cs и падает
-// с CS0579.
+// Объекты сборки попадают в _diag\obj — основному проекту они не мешают:
+// в FB2AccentConverter.csproj есть <Compile Remove="_diag\**\*.cs" />.
 
 using System;
 using System.IO;
