@@ -81,6 +81,30 @@ internal static class Program
 private static readonly Lazy<Dictionary<string, string>> BuiltInStressDictionary = new(LoadBuiltInStressDictionary);
     private static readonly Lazy<Dictionary<string, string>> YoDictionary = new(LoadYoDictionary);
     private static readonly Lazy<Dictionary<string, string>> SupplementaryStressDictionary = new(LoadSupplementaryStressDictionary);
+    // ======================= Фразеологизмы =======================
+    // В устойчивых выражениях ударение закреплено за фразой, а его разбор идёт
+    // пословно: в «от мала до велика» модели ставят на именительный «ма́ла» и
+    // «вели́ка», хотя во фразе родительный — «мала́», «велика́».
+    //
+    // Сами слова записаны в литературные-ударения.txt («ма́лый, мал, мала́, мало́…;
+    // от ма́ла до вели́ка»), но словари пословные: применить запись некому. Поэтому
+    // фраза распознаётся здесь, а её слова уже идут в словарь и в разбор по контексту.
+    // Набор пар повторён в add_stress_anchor.py (IDIOMS): мост снимает знаки с фразы
+    // ещё до того, как слово уйдёт готовым вариантом во все вхождения по книге.
+    private static readonly (string First, string Last)[] Idioms =
+    {
+        ("мала", "велика"),
+        ("малу", "велику"),
+    };
+
+    private static readonly System.Text.RegularExpressions.Regex IdiomToken = new(
+        "[\\p{L}\\p{M}\\u2019'-]+", System.Text.RegularExpressions.RegexOptions.Compiled | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    // Разделитель внутри фразы: пробел (в том числе неразрывный) или тире.
+    private static readonly HashSet<string> IdiomSeparators = new(StringComparer.Ordinal)
+    {
+        " ", "\u00a0", "-", "\u2013", "\u2014",
+    };
 
     internal static string SupplementaryStressDictionaryPath => Path.Combine(DataDirectory, "dictionary", "\u0443\u0434\u0430\u0440\u0435\u043D\u0438\u044F-\u0437\u0430\u0440\u0432\u0430.txt");
 
@@ -2823,6 +2847,7 @@ private static readonly Lazy<Dictionary<string, string>> BuiltInStressDictionary
             else throw new InvalidDataException("Silero вернул неожиданный формат результата.");
             var valid = EnsureOriginalPunctuation(inferenceInput, marked);
             valid = ProtectUnstressedWords(valid);
+            valid = ApplyIdioms(valid);
             valid = RestoreSourceCapitalization(inferenceInput, valid);
             // Existing explicit marks take priority in the default second-opinion mode;
             // align tokens by order and keep the complete RUAccent token when already marked.
@@ -2911,7 +2936,9 @@ private static readonly Lazy<Dictionary<string, string>> BuiltInStressDictionary
                 ConvertTextFile(input, output, model, device, report, reportProgress, control, diagnostics, reviewPath, deaccentInput);
             else
             {
-                using var accentizer = new RuAccentWorker(model, true, device, report, diagnostics);
+                // Отметки этапа «по базе» уже стоят в тексте: это и есть staged, где
+                // кеш по слову без контекста недопустим (см. RuAccentWorker).
+                using var accentizer = new RuAccentWorker(model, true, device, report, diagnostics, staged: !deaccentInput);
                 accentizer.Start();
                 control.Checkpoint();
                 ConvertFile(input, output, accentizer, includeIllustrations, reportProgress, control, diagnostics, reviewPath, deaccentInput);
@@ -3063,7 +3090,7 @@ private static readonly Lazy<Dictionary<string, string>> BuiltInStressDictionary
                 {
                     var modelOutput = MoveAccentAfterVowel(inference.Text ?? content);
                     var modelProcessed = ProtectUnstressedWords(EnsureDialogueInitialWordAccent(content, modelOutput, accentizer));
-                    var modelProcessedWithPunctuation = EnsureOriginalPunctuation(content, modelProcessed);
+                    var modelProcessedWithPunctuation = ApplyIdioms(EnsureOriginalPunctuation(content, modelProcessed));
                     accentedLines[i] = ApplyYoDictionary(modelProcessedWithPunctuation);
                     var reviewCountBefore = wordReview.Count;
                     foreach (var word in CollectUnrecognizedWords(content, accentedLines[i]!, wordReview))
@@ -4637,6 +4664,14 @@ private static int ApplyPatternReplacementMapToText(string inputPath, string out
             var key = DictionaryKey(word);
             if (key.Length == 0) continue;
             if (!words.ContainsKey(key)) words[key] = word;
+        }
+        // Слова фразеологизмов — только без ударения: сами по себе это обычные формы
+        // («ма́ла» от «малый»), и жёсткое «мала́» испортило бы их в остальном тексте.
+        // Без знака слово идёт в разбор по контексту и во фразе получает родительный.
+        foreach (var (first, last) in Idioms)
+        {
+            words.TryAdd(first, first);
+            words.TryAdd(last, last);
         }
         return words;
     }
@@ -6834,6 +6869,70 @@ private static int ApplyPatternReplacementMapToText(string inputPath, string out
         return WordTokens.Replace(text, match => ProtectWord(match.Value));
     }
 
+    // Устойчивые выражения проверяются по словам, а не регулярным выражением: фраза
+    // может быть записана «мала велика» или «мала до велика», а из-за сворачивания
+    // регулярного выражения составная форма «(?:А|Б) до (?:В|Г)» ищется медленно.
+    // Между словами фразы допустимы только разделители: запятая или перенос строки
+    // значит, что это уже не одно выражение.
+    internal static string ApplyIdioms(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return text;
+        var pieces = new List<string>();
+        var last = 0;
+        foreach (System.Text.RegularExpressions.Match match in IdiomToken.Matches(text))
+        {
+            pieces.Add(text[last..match.Index]);
+            pieces.Add(match.Value);
+            last = match.Index + match.Length;
+        }
+        pieces.Add(text[last..]);
+        var changed = false;
+        for (var index = 1; index < pieces.Count; index += 2)
+        {
+            var span = IdiomSpan(pieces, index);
+            if (span == null) continue;
+            for (var position = span.Value.First; position <= span.Value.Last; position += 2)
+            {
+                if (pieces[position].IndexOf('\u0301') < 0) continue;
+                pieces[position] = pieces[position].Replace("\u0301", "", StringComparison.Ordinal);
+                changed = true;
+            }
+        }
+        return changed ? string.Concat(pieces) : text;
+    }
+
+    // Номера первого и последнего слова фразеологизма или null, если с index фраза
+    // не начинается. Слова в pieces стоят на нечётных индексах, разделители — между ними.
+    private static (int First, int Last)? IdiomSpan(List<string> pieces, int index)
+    {
+        var first = NormalizeIdiomWord(pieces[index]);
+        foreach (var (left, right) in Idioms)
+        {
+            if (!first.Equals(left, StringComparison.Ordinal)) continue;
+            foreach (var step in new[] { 2, 4 })
+            {
+                var tail = index + step;
+                if (tail >= pieces.Count) continue;
+                if (!NormalizeIdiomWord(pieces[tail]).Equals(right, StringComparison.Ordinal)) continue;
+                if (step == 4 && !NormalizeIdiomWord(pieces[index + 2]).Equals("до", StringComparison.Ordinal)) continue;
+                var separators = true;
+                for (var between = index + 1; between < tail; between += 2)
+                    if (!IdiomSeparators.Contains(pieces[between])) { separators = false; break; }
+                if (separators) return (index, tail);
+            }
+        }
+        return null;
+    }
+
+    // Буквы слова без знака ударения и дефиса: «ма́ла» и «мала» — одно и то же слово.
+    private static string NormalizeIdiomWord(string word)
+    {
+        var builder = new StringBuilder(word.Length);
+        foreach (var ch in word)
+            if (ch != '\u0301' && char.IsLetter(ch)) builder.Append(char.ToLowerInvariant(ch));
+        return builder.ToString();
+    }
+
     private static string ProtectWord(string word)
     {
         if (word.IndexOf('\u0301') < 0) return word;
@@ -7022,7 +7121,7 @@ private static int ApplyPatternReplacementMapToText(string inputPath, string out
                     {
                         var modelOutput = MoveAccentAfterVowel(inference.Text ?? sourceText);
                         var modelProcessed = ProtectUnstressedWords(EnsureDialogueInitialWordAccent(sourceText, modelOutput, accentizer));
-                        var modelProcessedWithPunctuation = EnsureOriginalPunctuation(sourceText, modelProcessed);
+                        var modelProcessedWithPunctuation = ApplyIdioms(EnsureOriginalPunctuation(sourceText, modelProcessed));
                         var accented = ApplyYoDictionary(modelProcessedWithPunctuation);
                         var reviewCountBefore = wordReview.Count;
                         foreach (var word in CollectUnrecognizedWords(sourceText, accented, wordReview))
@@ -7324,14 +7423,20 @@ private static int ApplyPatternReplacementMapToText(string inputPath, string out
         private readonly ConversionDiagnostics? _diagnostics;
         private TimeSpan _workerInferenceTime;
         private long _workerCallCount;
+        private readonly bool _staged;
 
-        public RuAccentWorker(string model, bool dictionary, string device, Action<string>? report = null, ConversionDiagnostics? diagnostics = null)
+        // staged — этап «по базе» с уже размеченным текстом. Там одно и то же слово
+        // в одном месте книги читается по-разному («ма́ла» и «мала́»), и кеш по слову
+        // без контекста разнёс бы первое встреченное прочтение по всей книге.
+        public RuAccentWorker(string model, bool dictionary, string device, Action<string>? report = null,
+            ConversionDiagnostics? diagnostics = null, bool staged = false)
         {
             _diagnostics = diagnostics;
             _model = model;
             _dictionary = dictionary;
             _device = device;
             _report = report;
+            _staged = staged;
         }
 
         public void EnsureStarted()
@@ -7367,6 +7472,7 @@ private static int ApplyPatternReplacementMapToText(string inputPath, string out
             start.ArgumentList.Add("--model"); start.ArgumentList.Add(_model);
             start.ArgumentList.Add("--device"); start.ArgumentList.Add(_device);
             start.ArgumentList.Add(_dictionary ? "--dictionary" : "--no-dictionary");
+            if (_staged) start.ArgumentList.Add("--staged");
             _process = System.Diagnostics.Process.Start(start) ?? throw new InvalidOperationException("Не удалось запустить Python для ruaccent.");
             var errors = new StringBuilder();
             _process.ErrorDataReceived += (_, e) =>

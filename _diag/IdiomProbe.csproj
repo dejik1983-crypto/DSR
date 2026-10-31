@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Проверка внутренних методов DSR (Program.ApplyIdioms) без запуска окна.
+       Запуск — из папки _diag:  dotnet run  (аргумент — путь к DSR.dll).
+
+       Куда уходят объекты сборки, задаёт соседний Directory.Build.props: они должны
+       лежать вне _diag, иначе основной проект при dotnet build видит второй
+       AssemblyInfo.cs и падает с CS0579 «Повторяющийся атрибут AssemblyVersionAttribute». -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="IdiomProbe.cs" />
+  </ItemGroup>
+</Project>

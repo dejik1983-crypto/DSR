@@ -375,8 +375,10 @@ def _cache_store(word: str, value: str) -> None:
         _ACCENT_CACHE[word] = value
 
 
-def install_accent_cache(accentizer) -> None:
-    if not _ACCENT_CACHE_ENABLED:
+def install_accent_cache(accentizer, enabled: bool = None) -> None:
+    if enabled is None:
+        enabled = _ACCENT_CACHE_ENABLED
+    if not enabled:
         return
     model = getattr(accentizer, "accent_model", None)
     if model is None:
@@ -686,6 +688,9 @@ def main() -> int:
     parser.add_argument("--model", default="big_poetry")
     parser.add_argument("--device", choices=("CPU", "CUDA"), default="CPU")
     parser.add_argument("--probe-gpu", action="store_true")
+    # Этап «по базе»: текст уже размечен, а одно и то же слово в книге читается
+    # по-разному. Кеш по слову без контекста закрепил бы первое прочтение везде.
+    parser.add_argument("--staged", action="store_true")
     dictionary_group = parser.add_mutually_exclusive_group()
     dictionary_group.add_argument("--dictionary", dest="dictionary", action="store_true")
     dictionary_group.add_argument("--no-dictionary", dest="dictionary", action="store_false")
@@ -764,7 +769,8 @@ def main() -> int:
                 time.sleep(2 * _attempt)
         if _load_error is not None:
             raise _load_error
-        install_accent_cache(accentizer)
+        # Режим «по базе» (--staged): кеш отключён только для него, см. выше.
+        install_accent_cache(accentizer, enabled=_ACCENT_CACHE_ENABLED and not args.staged)
         install_batched_pipeline(accentizer)
         if args.device == "CUDA":
             model_names = ("omograph_model", "accent_model", "stress_usage_predictor", "yo_homograph_model")

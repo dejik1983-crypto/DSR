@@ -1,0 +1,10 @@
+<Project>
+  <!-- Объекты сборки пробника держим вне папки _diag: иначе основной проект при
+       dotnet build находит второй AssemblyInfo.cs и падает с CS0579. Путь задаётся
+       здесь, а не в IdiomProbe.csproj: MSBuild меняет свойство слишком поздно и ругается
+       предупреждением MSB3539. -->
+  <PropertyGroup>
+    <BaseIntermediateOutputPath>$(MSBuildThisFileDirectory)..\_diag-obj\IdiomProbe\obj\</BaseIntermediateOutputPath>
+    <BaseOutputPath>$(MSBuildThisFileDirectory)..\_diag-obj\IdiomProbe\bin\</BaseOutputPath>
+  </PropertyGroup>
+</Project>
