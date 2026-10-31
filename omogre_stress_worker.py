@@ -12,8 +12,10 @@
   combining acute U+0301 *после* гласной, поэтому знак переносится здесь;
 * буква ё сама несёт ударение и никогда не получает лишний знак — DSR отвергает
   правку с таким знаком при проверке;
-* окно модели ограничено ~510 токенами, поэтому на вход идёт предложение вокруг
-  вхождения слова, а не весь абзац;
+* фраза длиннее окна модели (~510 токенов) роняет разбор: библиотека не берёт её
+  целиком и на своём же пределе падает — «assert False» или NameError, у которого
+  пустое сообщение; поэтому на вход идёт предложение вокруг вхождения, а если оно
+  не помещается — кусок фразы со словом посередине (см. context_window);
 * библиотека умеет отвечать по каждому вхождению отдельно (op «cases»): так
   омограф разбирается не словом целиком, а по предложению — «в этих случаях
   зам+ок, а в этих з+амок». Именно этот режим использует страница «Контроль ИИ»;
@@ -43,6 +45,19 @@ ACCENT = "\u0301"
 # идёт одна фраза. Больше 2000 символов для русского — это уже за пределом.
 CONTEXT_RADIUS = 600
 MAX_CONTEXT_CHARS = 2000
+
+# Предел окна модели (omogre.accentuator.reader.MAX_SENTENCE_LEN) и запас под
+# разбор на токены: каждое слово — не меньше двух токенов (начало и конец), знаки
+# препинания — ещё токены, а [CLS]/[SEP] библиотека прибавляет сама.
+MAX_MODEL_TOKENS = 510
+TOKEN_MARGIN = 32
+SENTENCE_END = ".!?…"
+PUNCTUATION = set(SENTENCE_END + ";:\n\r()«»\"—–-,")
+# Проверка «поместится ли фраза» однажды уже опоздала: окно в 2000 символов
+# проходило проверку по буквам, а библиотека падала на границе батча, потому что
+# в ней считается по-другому (лимит × число фраз минус один токен). Поэтому
+# около лимита остаётся запас не в один токен, а в несколько фраз.
+REQUEST_MARGIN = 6
 
 # Сколько токенов слов отдавать модели неизвестных слов за один прогон. У неё
 # свой предел — 6000 токенов на батч (unk_reader.MAX_BATCH_TOKEN_NUM), берём с
@@ -98,15 +113,162 @@ def _cuda_unavailable_reason() -> str:
         return str(error)
 
 
+def _describe(error: BaseException) -> str:
+    """Причина обычными словами: у assert и NameError в самой библиотеке сообщения нет.
+
+    Пустое сообщение и было настоящей поломкой: пользователь видел «omogre не смог
+    разобрать контекст: » и не понимал, что случилось. Теперь причина называется сама.
+    """
+    text = str(error).strip()
+    name = type(error).__name__
+    if not text:
+        if name == "NameError":
+            return "в библиотеке omogre не разобрано слишком длинное предложение"
+        if name == "AssertionError":
+            return "фраза не поместилась в пакет библиотеки omogre (слишком длинное предложение)"
+        return f"неизвестная ошибка библиотеки {name} без описания"
+    return f"{name}: {text}"
+
+
+def _token_count(accentor, text: str) -> int:
+    """Сколько токенов модель получит за эту фразу.
+
+    Считает сам omogre: у него буквы и знаки разбираются в токены, а [CLS] и
+    [SEP] тоже занимают место. Если разбор не удался, считаем по худшему
+    случаю — два токена на букву и токен на каждый знак, плюс два служебных:
+    такая оценка сужает окно сильнее, но длинное не пропускает.
+    """
+    try:
+        ids, _, _ = accentor._accentuator.accentuator.tokenizer.get_inf_tokens(text)
+        return len(ids)
+    except Exception:
+        return 2 * sum(1 for char in text if char.isalpha()) + sum(
+            1 for char in text if char in PUNCTUATION) + 2
+
+
+def _fits(accentor, text: str) -> bool:
+    return _token_count(accentor, text) + REQUEST_MARGIN < MAX_MODEL_TOKENS
+
+
+def _split_sentence(text: str):
+    """Делит фразу на предложения — так, как их видит правило длины в самой библиотеке.
+
+    Библиотека режет фразу на «мягкие» (всё размечается словарём) и «модельные»
+    (есть слова с вариантами ударения). Модельных за один вызов должно быть
+    меньше десятка — иначе она падает на границе пакета, а если среди них есть
+    длинное предложение — с пустой ошибкой. Поэтому фраза разрезается заранее:
+    по концу предложения, по длинной паузе из нескольких пробелов и по пределу
+    длины куска.
+    """
+    pieces = []
+    current = ""
+    index = 0
+    while index < len(text):
+        char = text[index]
+        current += char
+        # Конец предложения: знак, за которым пробел или начало следующего.
+        if char in SENTENCE_END:
+            after = index + 1
+            while after < len(text) and text[after] in "\"»)..":
+                current += text[after]
+                after += 1
+            # Пробел ПОСЛЕ точки — часть той же фразы: иначе каждый следующий
+            # кусок начинается с пробела, и « ".join(...)» ломает порядок слов
+            # в запросе — позиции в ответе разъезжаются с позициями запроса.
+            while after < len(text) and text[after] in " \t":
+                current += text[after]
+                after += 1
+            pieces.append(current)
+            current = ""
+            index = after
+            continue
+        # Длинная пауза из нескольких пробелов тоже отделяет один кусок от другого.
+        if char in " \t" and len(current) > 200:
+            run = index
+            while run < len(text) and text[run] in " \t":
+                run += 1
+            if run - index >= 2:
+                pieces.append(current)
+                current = ""
+                index = run
+                continue
+        index += 1
+    if current:
+        pieces.append(current)
+    return [piece for piece in pieces if piece.strip()]
+
+
+def _split_long_piece(piece: str, limit: int):
+    """Делит слишком длинный кусок по словам, чтобы каждый был не длиннее limit.
+
+    Склейка обратно — тем же разделителем « », поэтому каждый кусок заканчивается
+    пробелом: иначе при склейке слова соседних кусков слиплись бы («Доном.Атаман»),
+    и позиции слов в ответе разъехались бы со словами запроса.
+    """
+    parts = []
+    current = ""
+    for word in piece.split(" "):
+        candidate = word if not current else current + " " + word
+        if current and len(candidate) > limit:
+            parts.append(current)
+            current = word
+        else:
+            current = candidate
+    if current:
+        parts.append(current)
+    if not parts:
+        return [piece]
+    # Каждый кусок, кроме последнего, заканчивается пробелом: так склейка
+    # " ".join(...) ничего не теряет и не слипает слова на границе.
+    return [part.rstrip() + " " for part in parts[:-1]] + [parts[-1]]
+
+
+def _window_around(context: str, word: str, size: int) -> str:
+    """Кусок фразы размером около size символов, но со словом не на самом краю.
+
+    Так слово остаётся в середине, и модель видит слева и справа примерно
+    одинаковый контекст, даже если предложение в книге оказалось длиннее окна.
+    """
+    low = context.casefold()
+    position = low.find(word.casefold())
+    if position < 0:
+        stem = word.casefold()[:max(3, len(word) - 2)]
+        position = low.find(stem) if stem else -1
+    if position < 0:
+        return context[:size]
+    start = max(0, position - size // 3)
+    end = min(len(context), start + size)
+    # Не режем по полуслову, если рядом есть пробел или знак препинания.
+    if start > 0:
+        while start < position and context[start] not in " \n\r\t" and not context[start] in PUNCTUATION:
+            start += 1
+    if end < len(context):
+        while end > position + len(word) and context[end - 1] not in " \n\r\t" and context[end - 1] not in PUNCTUATION:
+            end -= 1
+    return context[start:end]
+
+
 def _pick_variant(marked: str, word: str) -> str:
     """Ищет в размеченном предложении то же слово и возвращает его с ударением."""
     target = _normalize(word)
     for match in WORD_RE.finditer(marked):
         candidate = match.group(0)
         if _normalize(candidate) != target:
-            continue
+            # Составное слово через дефис: «К+аменка-Струм+илово» для «струмилово».
+            # Ударение внутри нужной части — годится, берём именно её.
+            part = next((piece for piece in re.split("[-'’]", candidate) if _normalize(piece) == target), None)
+            if part is None:
+                continue
+            candidate = part
         if "+" in candidate or ACCENT in candidate or "ё" in candidate.casefold():
-            return to_dsr_marks(candidate.replace(ACCENT, ""))
+            result = to_dsr_marks(candidate.replace(ACCENT, ""))
+            accents = result.count(ACCENT)
+            # Годится форма ровно с одним знаком (или «ё» без знака). Разметка с
+            # несколькими '+' или с '+' перед согласной — не ответ: честно
+            # возвращаем «нет ответа», а не слово без ударения.
+            if accents == 1 or (accents == 0 and "ё" in result.casefold()):
+                return result
+            return ""
         # Слово найдено, но знака у него нет (односложное или короткое) — ответа нет.
         return ""
     return ""
@@ -141,14 +303,24 @@ class OmogreAccentor:
         self._unk_cached_words = 0
         self._unk_cached_runs = 0
         self._install_unknown_word_cache()
+        # Размер куска фразы, который точно укладывается в окно модели (считается
+        # один раз, при первом длинном контексте).
+        self._safe_chars = None
 
     @property
     def device(self) -> str:
         return self._device
 
     @staticmethod
-    def context_window(context: str, word: str):
-        """Вырезает предложение вокруг вхождения слова, если контекст длинный."""
+    def context_window(context: str, word: str, accentor=None):
+        """Вырезает предложение вокруг вхождения слова, если контекст длинный.
+
+        Главное — уложиться в окно модели (~510 токенов): фразу длиннее этого
+        библиотека целиком не берёт, а на своём пределе падает с пустой ошибкой
+        («omogre не смог разобрать контекст: »). Поэтому окно проверяется по
+        токенам (счёт берётся у самого omogre), а не по числу символов, и режется
+        до тех пор, пока кусок не помещается.
+        """
         if len(context) <= MAX_CONTEXT_CHARS:
             return context
         low = context.casefold()
@@ -157,21 +329,93 @@ class OmogreAccentor:
             stem = word.casefold()[:max(3, len(word) - 2)]
             position = low.find(stem)
         if position < 0:
-            return context[:MAX_CONTEXT_CHARS]
-        start = max(0, position - CONTEXT_RADIUS)
-        end = min(len(context), position + len(word) + CONTEXT_RADIUS)
-        return context[start:end]
+            window = context[:MAX_CONTEXT_CHARS]
+        else:
+            start = max(0, position - CONTEXT_RADIUS)
+            end = min(len(context), position + len(word) + CONTEXT_RADIUS)
+            window = context[start:end]
+        if accentor is None:
+            return window
+        # Предел по токенам: счёт ведётся у самого omogre — только по укороченному
+        # куску, потому что разбор на токены всей фразы в 6 000 символов стоит
+        # больше, чем сам ответ модели.
+        safe = accentor._safe_window_chars()
+        if len(window) > safe:
+            window = _window_around(window, word, safe)
+        for _ in range(24):
+            if _fits(accentor, window):
+                return window
+            window = _window_around(window, word, max(len(word) + 40, int(len(window) * 0.8)))
+            if len(window) <= len(word) + 40:
+                break
+        # Совсем короткий кусок: одна фраза-абзац без точек (например, длинная
+        # цитата без знаков) — оставляем модель без контекста, но с самим словом.
+        return _window_around(window, word, max(len(word), 80))
+
+    def _safe_window_chars(self) -> int:
+        """Сколько символов фразы заведомо укладывается в окно модели.
+
+        Считается один раз на сеанс, на обычной русской фразе (длинные слова:
+        в длинном слове токенов больше всего), с двойным запасом: точный счёт
+        всё равно делается по настоящему окну перед разбором.
+        """
+        if self._safe_chars is None:
+            safe = 120
+            low, high = 120, 2000
+            while low <= high:
+                middle = (low + high) // 2
+                if _fits(self, "становление " * (middle // 12)):
+                    safe = middle
+                    low = middle + 1
+                else:
+                    high = middle - 1
+            self._safe_chars = max(80, safe // 2)
+        return self._safe_chars
 
     def accentuate_many(self, contexts):
-        """Размечает список предложений одним вызовом модели."""
+        """Размечает список фраз и склеивает ответ обратно по фразам.
+
+        Каждая фраза режется на предложения и разбирается отдельно, поэтому
+        длинная или слишком пёстрая фраза не отменяет весь разбор (раньше одна
+        такая фраза давала «omogre не смог разобрать контекст: » на всю книгу).
+        """
         if not contexts:
             return []
-        batch = list(contexts)
-        self.precompute_unknown_words(batch)
-        out = self._accentuator.accentuate(batch)
+        self.precompute_unknown_words(list(contexts))
+        limit = self._safe_window_chars()
+        marked = []
+        for text in contexts:
+            pieces = []
+            for sentence in _split_sentence(text):
+                pieces.extend(_split_long_piece(sentence, limit))
+            marked.append("".join(self._accentuate_pieces(pieces)))
+        return marked
+
+    def _accentuate_pieces(self, pieces):
+        """Разметка кусков: одной пачкой, а если библиотека не справилась — по одному."""
+        if not pieces:
+            return []
+        try:
+            out = self._accentuator.accentuate(list(pieces))
+        except Exception as error:
+            # Причину называем по-человечески: у assert False и NameError в самой
+            # библиотеке сообщение пустое, и пользователь видел «…: » без слов.
+            _emit(f"DSR_PROGRESS:omogre: пачка фраз не разобрана ({_describe(error)}), разбираю по одной")
+            return [self._accentuate_piece(piece, error) for piece in pieces]
         if isinstance(out, str):
-            out = [out]
-        return out
+            return [out]
+        return list(out)
+
+    def _accentuate_piece(self, text, batch_error):
+        """Ответ на один кусок: если и он не подошёл — пустая разметка и причина."""
+        try:
+            result = self._accentuator.accentuate([text])
+            if isinstance(result, str):
+                return result
+            return result[0] if result else ""
+        except Exception as error:
+            _emit(f"omogre: кусок пропущен ({_describe(error)}; в пачке — {_describe(batch_error)}): {text[:80]!r}")
+            return ""
 
     def _install_unknown_word_cache(self):
         """Запоминает ответы модели неизвестных слов (слово → позиция ударения).
@@ -233,7 +477,15 @@ class OmogreAccentor:
         from omogre.accentuator.reader import AccentDocument
 
         model = self._accentuator.accentuator
-        document = AccentDocument(model.tokenizer, list(contexts))
+        try:
+            document = AccentDocument(model.tokenizer, list(contexts))
+        except Exception:
+            # Длинная фраза роняет и этот разбор (библиотека зовёт свою версию
+            # get_batches с ошибкой), а ответ модели про неизвестные слова нужен
+            # не любой ценой: без пачки слов библиотека просто спросит их по одной.
+            document = None
+        if document is None:
+            return []
         vocabulary = model.tokenizer.accent_vocab.vocab
         variants = model.tokenizer.accent_vocab.vocab_index
 
@@ -346,7 +598,7 @@ def resolve_words(accentor: OmogreAccentor, payload):
         for context in (item or {}).get("contexts") or []:
             if not isinstance(context, str) or not context.strip():
                 continue
-            window = OmogreAccentor.context_window(context, str((item or {}).get("word", "")))
+            window = OmogreAccentor.context_window(context, str((item or {}).get("word", "")), accentor)
             if window not in index:
                 index[window] = len(unique)
                 unique.append(window)
@@ -354,7 +606,7 @@ def resolve_words(accentor: OmogreAccentor, payload):
         marked = accentor.accentuate_many(unique)
     except Exception as error:
         traceback.print_exc(file=sys.stderr)
-        return {"error": f"omogre не смог разобрать контекст: {error}"}
+        return {"error": f"omogre не смог разобрать контекст: {_describe(error)}"}
 
     suggestions = {}
     rejected = []
@@ -368,7 +620,7 @@ def resolve_words(accentor: OmogreAccentor, payload):
         for context in (item or {}).get("contexts") or []:
             if not isinstance(context, str) or not context.strip():
                 continue
-            window = OmogreAccentor.context_window(context, word)
+            window = OmogreAccentor.context_window(context, word, accentor)
             position = index.get(window)
             if position is None or position >= len(marked):
                 continue
@@ -402,7 +654,7 @@ def resolve_cases(accentor: OmogreAccentor, payload):
         context = str((item or {}).get("context", ""))
         if not context.strip():
             continue
-        window = OmogreAccentor.context_window(context, str((item or {}).get("word", "")))
+        window = OmogreAccentor.context_window(context, str((item or {}).get("word", "")), accentor)
         if window not in index:
             index[window] = len(unique)
             unique.append(window)
@@ -410,7 +662,7 @@ def resolve_cases(accentor: OmogreAccentor, payload):
         marked = accentor.accentuate_many(unique)
     except Exception as error:
         traceback.print_exc(file=sys.stderr)
-        return {"error": f"omogre не смог разобрать контекст: {error}"}
+        return {"error": f"omogre не смог разобрать контекст: {_describe(error)}"}
 
     cases = []
     rejected = []
@@ -425,7 +677,7 @@ def resolve_cases(accentor: OmogreAccentor, payload):
         except (TypeError, ValueError):
             occurrence = 0
         context = str((item or {}).get("context", ""))
-        window = OmogreAccentor.context_window(context, word)
+        window = OmogreAccentor.context_window(context, word, accentor)
         position = index.get(window)
         found = ""
         if position is not None and position < len(marked):
